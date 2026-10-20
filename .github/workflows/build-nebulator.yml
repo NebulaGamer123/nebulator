@@ -1,0 +1,107 @@
+name: Build NEBULATOR (Windows installer + portable zip)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+env:
+  CEMU_COMMIT: a53cf0e
+  APP_VERSION: "0.2"
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Fetch Cemu sources (pinned commit)
+        shell: bash
+        run: |
+          git clone https://github.com/cemu-project/Cemu.git cemu
+          cd cemu
+          git checkout "$CEMU_COMMIT"
+          git submodule update --init --recursive
+
+      - name: Apply NEBULATOR patch, icon and UI
+        shell: bash
+        run: |
+          cd cemu
+          git apply --whitespace=nowarn ../overlay/nebulator-core.patch
+          cp ../overlay/installer/nebulator.ico   src/resource/logo_icon.ico
+          cp ../overlay/installer/nebulator16.ico src/resource/logo_icon16.ico
+          mkdir -p bin/ui
+          cp -r ../overlay/ui/. bin/ui/
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.29.0'
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('overlay/nebulator-core.patch') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: Bootstrap vcpkg
+        shell: cmd
+        run: cemu\dependencies\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Configure
+        shell: pwsh
+        working-directory: cemu
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/cemu/dependencies/vcpkg
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Build
+        shell: pwsh
+        working-directory: cemu/build
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/cemu/dependencies/vcpkg
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
+        run: cmake --build . --config release
+
+      - name: Stage files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Get-ChildItem cemu\bin\*.exe | ForEach-Object { Write-Host "built:" $_.Name }
+          Copy-Item cemu\bin\nebulator-core.exe stage\
+          Copy-Item cemu\bin\ui stage\ui -Recurse
+          Copy-Item cemu\bin\resources stage\resources -Recurse
+          Copy-Item cemu\bin\gameProfiles stage\gameProfiles -Recurse
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:APP_VERSION" "/DStageDir=$PWD\stage" overlay\installer\nebulator.iss
+
+      - name: Make portable zip
+        shell: pwsh
+        run: |
+          Set-Content -Path stage\portable.txt -Value "Delete this file to store data in %APPDATA%\NEBULATOR instead."
+          Compress-Archive -Path stage\* -DestinationPath overlay\out\NEBULATOR-portable.zip
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEBULATOR-Setup
+          path: overlay/out/NEBULATOR-Setup.exe
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEBULATOR-portable
+          path: overlay/out/NEBULATOR-portable.zip
