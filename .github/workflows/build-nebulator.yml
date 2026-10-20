@@ -74,7 +74,22 @@ jobs:
         env:
           VCPKG_ROOT: ${{ github.workspace }}/cemu/dependencies/vcpkg
           VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
-        run: cmake --build . --config release
+        run: |
+          cmake --build . --config release 2>&1 | Tee-Object -FilePath ../../build.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # Surface the real compiler errors as run annotations so they can be read without downloading the log
+            $log  = Get-Content ../../build.log
+            $errs = $log | Select-String -Pattern 'error C\d+|error LNK\d+|fatal error|: error |FAILED:' |
+                    ForEach-Object { $l = $_.Line.Trim(); $l.Substring(0, [Math]::Min(400, $l.Length)) } |
+                    Select-Object -Unique | Select-Object -First 40
+            $tail = $log | Select-Object -Last 40 |
+                    ForEach-Object { $l = "$_"; $l.Substring(0, [Math]::Min(400, $l.Length)) }
+            function Esc($lines) { (($lines -join "`n") -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A') }
+            Write-Host "::error title=Compile errors::$(Esc $errs)"
+            Write-Host "::error title=Log tail::$(Esc $tail)"
+            exit $code
+          }
 
       - name: Stage files
         shell: pwsh
