@@ -100,7 +100,7 @@ index d8378c3..afb8b4c 100644
  )
  
  if(UNIX AND NOT APPLE)
-@@ -229,3 +238,10 @@ endif()
+@@ -229,3 +238,13 @@ endif()
  if (BSD)
  	target_link_libraries(CemuBin PRIVATE execinfo SPIRV-Tools SPIRV-Tools-opt)
  endif()
@@ -111,6 +111,9 @@ index d8378c3..afb8b4c 100644
 +endif()
 +
 +set_source_files_properties(gui/sdlgui/LinuxLtoShim.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto;-O0;-fno-inline")
++
++# the removed wx GUI used to link CemuResource (default font data, extractCafeDefaultFont); every platform needs it
++target_link_libraries(CemuBin PRIVATE CemuResource)
 diff --git a/src/gui/CMakeLists.txt b/src/gui/CMakeLists.txt
 index d66e971..593c886 100644
 --- a/src/gui/CMakeLists.txt
