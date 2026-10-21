@@ -75,22 +75,28 @@
 
   /* ───────── catalog picker ───────── */
   function openCatalog() {
-    const input = h('input', { type: 'text', placeholder: 'Search 480 figures…', spellcheck: 'false' });
+    const input = h('input', { type: 'text', placeholder: `Search ${catalog.length} figures…`, spellcheck: 'false' });
     const listEl = h('div', { class: 'clist' });
+    // every figure, grouped by game (no cap); the search narrows it down
+    const sorted = catalog.slice().sort((a, b) => SKY.gameRank(a.id) - SKY.gameRank(b.id) || a.id - b.id || a.var - b.var);
     const draw = () => {
       const q = input.value.trim().toLowerCase();
-      const rows = catalog.filter(c => !q || c.name.toLowerCase().includes(q) || SKY.element(c.id).name.toLowerCase() === q).slice(0, 80);
-      listEl.replaceChildren(...rows.map(c => {
-        const e = SKY.element(c.id);
-        return h('button', { class: 'crow', style: `--ec:${e.color}`, onclick: () => create(c) },
-          glyph(SKY.elementKey(c.id), 'sm'), h('span', { class: 'cn' }, c.name), h('span', { class: 'cg' }, e.name + ' · ' + SKY.gameOf(c.id)));
-      }));
+      const rows = sorted.filter(c => !q || c.name.toLowerCase().includes(q) || SKY.element(c.id).name.toLowerCase() === q || SKY.gameOf(c.id).toLowerCase().includes(q));
+      const out = []; let lastGame = null;
+      for (const c of rows) {
+        const e = SKY.element(c.id), g = SKY.gameOf(c.id), top = g.split(' · ')[0];
+        if (top !== lastGame) { lastGame = top; out.push(h('div', { class: 'cgroup' }, top)); }
+        out.push(h('button', { class: 'crow', style: `--ec:${e.color}`, onclick: () => create(c) },
+          glyph(SKY.elementKey(c.id), 'sm'), h('span', { class: 'cn' }, c.name), h('span', { class: 'cg' }, e.name + ' · ' + g)));
+      }
+      listEl.replaceChildren(...out);
+      listEl.scrollTop = 0;
       if (!rows.length) listEl.append(h('div', { class: 'fempty' }, 'Nothing matches'));
     };
     input.addEventListener('input', draw);
     NEB.modal(h('div', { class: 'mbox wide' },
       h('h2', null, 'New figure'),
-      h('p', { class: 'lead' }, 'Creates a blank save file for the figure in your collection.'),
+      h('p', { class: 'lead' }, 'Creates a blank save file for the figure in your collection. Search by name, element or game.'),
       input, listEl,
       h('div', { class: 'mfoot' }, h('button', { class: 'btn', onclick: () => NEB.closeModal() }, 'Close'))));
     draw(); setTimeout(() => input.focus(), 50);
@@ -133,7 +139,7 @@
     if (!st || !root) return;
     const f = st.collection[sel];
     const sky = root.querySelector('.sky');
-    if (sky && f) sky.style.setProperty('--el', elOf(f).color);
+    if (sky && f) { sky.style.setProperty('--el', elOf(f).color); const t = document.getElementById('tint'); if (t) t.style.setProperty('--el', elOf(f).color); }
     if (strip) {
       [...strip.children].forEach((c, i) => {
         const o = i - sel, a = Math.abs(o);
@@ -212,7 +218,7 @@
           h('span', { class: 'pname' }, on ? s.name : ''));
       })));
 
-    const wrap = h('div', { class: 'sky' }, h('div', { class: 'sky-bg' }), head, body, pads);
+    const wrap = h('div', { class: 'sky' }, head, body, pads);
     root.replaceChildren(wrap);
     layout(false);
   }
@@ -247,11 +253,12 @@
   NEB.registerPage('skylanders', {
     show(el) {
       root = el; alive = true; strip = null;
-      el.replaceChildren(h('div', { class: 'sky' }, h('div', { class: 'sky-bg' })));
+      el.replaceChildren(h('div', { class: 'sky' }));
+      document.body.classList.add('tint-on');
       addEventListener('keydown', key); cleanups.push(() => removeEventListener('keydown', key));
       load(); requestAnimationFrame(padLoop);
     },
-    hide() { alive = false; root = null; strip = null; cleanups.splice(0).forEach(fn => fn()); },
+    hide() { alive = false; root = null; strip = null; document.body.classList.remove('tint-on'); cleanups.splice(0).forEach(fn => fn()); },
   });
   NEB.on('online', () => { if (alive) load(); });
 })();

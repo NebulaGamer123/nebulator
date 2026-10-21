@@ -284,7 +284,10 @@
     if (t && t.matches && t.matches('input, textarea, select')) { if (e.key === 'Escape') t.blur(); return; }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (blocked()) {
-      if ((e.key === 't' || e.key === 'T') && !NEB.captureKeys) setTheme(THEME_ORDER[(THEME_ORDER.indexOf(S.theme) + 1) % 3]);
+      // on a page (Skylanders, Controls, ...) up/down still switch sections, unless a dialog is open or a bind is being captured
+      if (!NEB.captureKeys && !document.body.classList.contains('modal-open') && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        cycleSystem(e.key === 'ArrowDown' ? 1 : -1); e.preventDefault();
+      }
       return;
     }
     const inSheet = t && t.closest && t.closest('.sheet');
@@ -294,7 +297,6 @@
       case 'ArrowDown': case 's': case 'S': cycleSystem(1); break;
       case 'ArrowUp': case 'w': case 'W': cycleSystem(-1); break;
       case 'Enter': case ' ': if (inSheet) return; activate(); break;
-      case 't': case 'T': setTheme(THEME_ORDER[(THEME_ORDER.indexOf(S.theme) + 1) % 3]); break;
       case 'Escape': closeSheet(); break;
       default: return;
     }
@@ -303,18 +305,18 @@
 
   let padPrev = {};
   function pollPad() {
-    if (blocked() || NEB.padBusy) return;
+    const onPage = document.body.classList.contains('page-open') && !document.body.classList.contains('modal-open');
+    if ((blocked() && !onPage) || NEB.padBusy) return;
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
     const gp = [...pads].find(Boolean); if (!gp) return;
     const b = i => !!(gp.buttons[i] && gp.buttons[i].pressed), ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
     const st = { l: b(14) || ax < -.6, r: b(15) || ax > .6, u: b(12) || ay < -.6, d: b(13) || ay > .6, a: b(0), b: b(1), y: b(3), lb: b(4), rb: b(5) };
-    if (st.l && !padPrev.l) move(-1);
-    if (st.r && !padPrev.r) move(1);
+    if (!onPage && st.l && !padPrev.l) move(-1);
+    if (!onPage && st.r && !padPrev.r) move(1);
     if ((st.d && !padPrev.d) || (st.rb && !padPrev.rb)) cycleSystem(1);
     if ((st.u && !padPrev.u) || (st.lb && !padPrev.lb)) cycleSystem(-1);
-    if (st.a && !padPrev.a) activate();
-    if (st.b && !padPrev.b) closeSheet();
-    if (st.y && !padPrev.y) setTheme(THEME_ORDER[(THEME_ORDER.indexOf(S.theme) + 1) % 3]);
+    if (!onPage && st.a && !padPrev.a) activate();
+    if (!onPage && st.b && !padPrev.b) closeSheet();
     padPrev = st;
   }
 

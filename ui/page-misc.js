@@ -111,7 +111,8 @@
         return [
           h('div', { class: 'about-mark', innerHTML: NEB.$('.mark').outerHTML }),
           h('p', { class: 'lead' }, 'NEBULATOR runs Wii U games with the emulation core taken from Cemu (MPL-2.0) under a new interface. It is not an official Cemu build, so fixes made to Cemu later are not picked up automatically.'),
-          grp('Core', h('p', { class: 'lead' }, st.version || '')),
+          grp('Version', h('p', { class: 'lead' }, st.version || ''),
+            h('button', { class: 'btn', onclick: e => { SFX.select(); e.currentTarget.blur(); NEB.checkForUpdates(false); } }, 'Check for updates')),
           grp('Data folder', h('p', { class: 'lead mono' }, st.dataPath || '')),
           note('Switch, Wii and GameCube are planned. Only Wii U runs today.'),
         ];

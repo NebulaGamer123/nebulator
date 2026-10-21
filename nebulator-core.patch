@@ -65,15 +65,16 @@ index 644032c..539ee5b 100644
  	if (NOT ENABLE_VCPKG)
  	    find_package(cubeb)
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index d8378c3..afb8b4c 100644
+index d8378c3..4a66880 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -67,6 +67,13 @@ add_subdirectory(resource)
+@@ -67,6 +67,14 @@ add_subdirectory(resource)
  add_executable(CemuBin
  	main.cpp
  	mainLLE.cpp
 +	gui/sdlgui/SdlWindowSystem.cpp
 +	gui/sdlgui/LinuxLtoShim.cpp
++	gui/sdlgui/ControlUpdate.cpp
 +	gui/sdlgui/HttpServer.cpp
 +	gui/sdlgui/ControlApi.cpp
 +	gui/sdlgui/ControlInput.cpp
@@ -82,7 +83,7 @@ index d8378c3..afb8b4c 100644
  )
  
  cemu_use_precompiled_header(CemuBin)
-@@ -94,7 +101,7 @@ string(TIMESTAMP CURRENT_YEAR "%Y" UTC)
+@@ -94,7 +102,7 @@ string(TIMESTAMP CURRENT_YEAR "%Y" UTC)
  
  set_property(TARGET CemuBin PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
  set_property(TARGET CemuBin PROPERTY WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>)
@@ -91,7 +92,7 @@ index d8378c3..afb8b4c 100644
  
  if (MACOS_BUNDLE)
  	set_property(TARGET CemuBin PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resource/MacOSXBundleInfo.plist.in")
-@@ -215,6 +222,8 @@ target_link_libraries(CemuBin PRIVATE
+@@ -215,6 +223,8 @@ target_link_libraries(CemuBin PRIVATE
  	CemuGui
  	CemuInput
  	CemuUtil
@@ -100,7 +101,7 @@ index d8378c3..afb8b4c 100644
  )
  
  if(UNIX AND NOT APPLE)
-@@ -229,3 +238,13 @@ endif()
+@@ -229,3 +239,13 @@ endif()
  if (BSD)
  	target_link_libraries(CemuBin PRIVATE execinfo SPIRV-Tools SPIRV-Tools-opt)
  endif()
@@ -114,6 +115,22 @@ index d8378c3..afb8b4c 100644
 +
 +# the removed wx GUI used to link CemuResource (default font data, extractCafeDefaultFont); every platform needs it
 +target_link_libraries(CemuBin PRIVATE CemuResource)
+diff --git a/src/Cafe/OS/libs/nsyshid/Skylander.cpp b/src/Cafe/OS/libs/nsyshid/Skylander.cpp
+index 7833796..0970f0c 100644
+--- a/src/Cafe/OS/libs/nsyshid/Skylander.cpp
++++ b/src/Cafe/OS/libs/nsyshid/Skylander.cpp
+@@ -1027,5 +1027,10 @@ namespace nsyshid
+ 
+ 		skyFile->SetPosition(0);
+ 		skyFile->writeData(data.data(), data.size());
++#if !BOOST_OS_WINDOWS
++		// the unix stream is buffered; NEBULATOR leaves the process without running destructors, so push every
++		// figure write (levels, upgrades, gold) to disk right away
++		skyFile->Flush();
++#endif
+ 	}
+ } // namespace nsyshid
+\ No newline at end of file
 diff --git a/src/gui/CMakeLists.txt b/src/gui/CMakeLists.txt
 index d66e971..593c886 100644
 --- a/src/gui/CMakeLists.txt
@@ -130,10 +147,10 @@ index d66e971..593c886 100644
 -endif()
 diff --git a/src/gui/sdlgui/ControlApi.cpp b/src/gui/sdlgui/ControlApi.cpp
 new file mode 100644
-index 0000000..afdbff2
+index 0000000..b3dacc2
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.cpp
-@@ -0,0 +1,651 @@
+@@ -0,0 +1,658 @@
 +#include "ControlApi.h"
 +
 +#include "config/ActiveSettings.h"
@@ -170,7 +187,6 @@ index 0000000..afdbff2
 +			return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 +		}
 +
-+		const char* kVersion = "NEBULATOR core 0.2";
 +
 +		std::string ContentType(const std::string& ext)
 +		{
@@ -556,7 +572,7 @@ index 0000000..afdbff2
 +			j.KS("state", s == State::Ui ? "ui" : s == State::Loading ? "loading" : "running");
 +			j.KS("title", g_cb.currentTitle ? g_cb.currentTitle() : "");
 +			j.KS("error", g_cb.lastError ? g_cb.lastError() : "");
-+			j.KS("version", kVersion);
++			j.KS("version", "NEBULATOR " + AppVersion());
 +			j.KS("dataPath", _pathToUtf8(ActiveSettings::GetUserDataPath()));
 +			j.KB("scanning", CafeTitleList::IsScanning());
 +			j.w.EndObject();
@@ -715,6 +731,12 @@ index 0000000..afdbff2
 +		g_token = std::move(token);
 +		g_uiDir = std::move(uiDir);
 +	}
++	void RequestQuit(bool appQuit)
++	{
++		if (g_cb.quit)
++			g_cb.quit(appQuit);
++	}
++
 +	int64_t MsSinceLastPoll()
 +	{
 +		const int64_t last = g_lastPollMs;
@@ -782,15 +804,17 @@ index 0000000..afdbff2
 +			return HandleSky(req, route.substr(3));
 +		if (route.rfind("gfx", 0) == 0)
 +			return HandleGfx(req, route.substr(3));
++		if (route.rfind("update", 0) == 0)
++			return HandleUpdate(req, route.substr(6));
 +		return Err(404, "unknown route");
 +	}
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlApi.h b/src/gui/sdlgui/ControlApi.h
 new file mode 100644
-index 0000000..b021aa6
+index 0000000..61971b8
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.h
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,80 @@
 +#pragma once
 +// JSON API + static file server behind the NEBULATOR UI.
 +
@@ -864,6 +888,9 @@ index 0000000..b021aa6
 +	HttpResponse HandleInput(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleSky(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleGfx(const HttpRequest& req, const std::string& sub);
++	HttpResponse HandleUpdate(const HttpRequest& req, const std::string& sub);
++	std::string AppVersion(); // from version.txt next to the exe ("dev" when missing)
++	void RequestQuit(bool appQuit);
 +	void SkyRestore(); // re-apply the saved portal slots
 +	void InputSetUserProfile(); // called when the UI changed bindings of player 1
 +	bool InputHasUserProfile();
@@ -1962,6 +1989,412 @@ index 0000000..b410087
 +			return SkyState();
 +		}
 +		return Err(404, "unknown route");
++	}
++} // namespace ControlApi
+diff --git a/src/gui/sdlgui/ControlUpdate.cpp b/src/gui/sdlgui/ControlUpdate.cpp
+new file mode 100644
+index 0000000..d083ee8
+--- /dev/null
++++ b/src/gui/sdlgui/ControlUpdate.cpp
+@@ -0,0 +1,400 @@
++// Self-update: asks GitHub whether a newer release exists, downloads its installer, checks the SHA-256 that is
++// published next to it, then runs the installer silently and exits so the files can be replaced.
++//
++//   GET  /api/update/check    -> {current, latest, available, offline, error, notes, canInstall}
++//   POST /api/update/install  -> starts the download (progress via /api/update/status)
++//   GET  /api/update/status   -> {stage: idle|downloading|verifying|ready|error, percent, message}
++//   POST /api/update/apply    -> runs the downloaded installer and quits NEBULATOR (Windows)
++
++#include "ControlApi.h"
++
++#include "config/ActiveSettings.h"
++
++#include <SDL3/SDL.h>
++#include <curl/curl.h>
++#include <openssl/evp.h>
++#include <atomic>
++#include <fstream>
++#include <mutex>
++#include <set>
++#include <thread>
++
++#if BOOST_OS_WINDOWS
++#include <windows.h>
++#endif
++
++namespace ControlApi
++{
++	namespace
++	{
++		constexpr const char* kRepo = "NebulaGamer123/nebulator";
++		constexpr const char* kSetupAsset = "NEBULATOR-Setup.exe";
++		constexpr const char* kShaAsset = "NEBULATOR-Setup.exe.sha256";
++
++		struct Upd
++		{
++			std::mutex m;
++			std::string stage = "idle";
++			std::string message;
++			std::atomic<int> percent{0};
++			std::string latest, notes, setupUrl, shaUrl;
++			fs::path file;
++			std::atomic_bool working{false};
++		} g_u;
++
++		void SetStage(const std::string& s, const std::string& msg = {})
++		{
++			std::scoped_lock l(g_u.m);
++			g_u.stage = s;
++			g_u.message = msg;
++		}
++
++		std::string Trim(std::string s)
++		{
++			while (!s.empty() && std::isspace((unsigned char)s.back())) s.pop_back();
++			size_t i = 0;
++			while (i < s.size() && std::isspace((unsigned char)s[i])) i++;
++			return s.substr(i);
++		}
++
++		std::vector<int> ParseVer(std::string s)
++		{
++			s = Trim(s);
++			if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) s.erase(0, 1);
++			std::vector<int> v;
++			size_t i = 0;
++			while (i < s.size())
++			{
++				if (!std::isdigit((unsigned char)s[i])) break;
++				int n = 0;
++				while (i < s.size() && std::isdigit((unsigned char)s[i])) n = n * 10 + (s[i++] - '0');
++				v.push_back(n);
++				if (i < s.size() && s[i] == '.') i++; else break;
++			}
++			return v;
++		}
++		// >0 when a is newer than b
++		int CmpVer(const std::string& a, const std::string& b)
++		{
++			auto x = ParseVer(a), y = ParseVer(b);
++			const size_t n = std::max(x.size(), y.size());
++			for (size_t i = 0; i < n; i++)
++			{
++				const int p = i < x.size() ? x[i] : 0, q = i < y.size() ? y[i] : 0;
++				if (p != q) return p > q ? 1 : -1;
++			}
++			return 0;
++		}
++
++		bool UrlAllowed(const std::string& url)
++		{
++			static const std::set<std::string> hosts = {"github.com", "api.github.com", "objects.githubusercontent.com",
++														"release-assets.githubusercontent.com", "github-releases.githubusercontent.com"};
++			if (url.rfind("https://", 0) != 0)
++				return false;
++			const size_t e = url.find_first_of("/?#", 8);
++			return hosts.count(url.substr(8, e == std::string::npos ? std::string::npos : e - 8)) != 0;
++		}
++
++		struct Sink
++		{
++			std::string* text = nullptr;
++			std::ofstream* file = nullptr;
++			std::atomic<int>* percent = nullptr;
++		};
++		size_t OnData(void* p, size_t sz, size_t n, Sink* s)
++		{
++			if (s->text) s->text->append((const char*)p, sz * n);
++			if (s->file) s->file->write((const char*)p, (std::streamsize)(sz * n));
++			return sz * n;
++		}
++		int OnProgress(Sink* s, curl_off_t total, curl_off_t now, curl_off_t, curl_off_t)
++		{
++			if (s->percent && total > 0) *s->percent = (int)(now * 100 / total);
++			return 0;
++		}
++
++		// returns the curl result; http status in code
++		CURLcode Get(const std::string& url, Sink& sink, long timeoutSec, long& code)
++		{
++			code = 0;
++			CURL* curl = curl_easy_init();
++			if (!curl)
++				return CURLE_FAILED_INIT;
++			curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
++			curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, OnData);
++			curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
++			curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, OnProgress);
++			curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &sink);
++			curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
++			curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
++			curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 6L);
++			curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
++			curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
++			curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
++			curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
++			curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
++			curl_easy_setopt(curl, CURLOPT_USERAGENT, "NEBULATOR-updater");
++			curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 6L);
++			curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeoutSec);
++			curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L);
++			const CURLcode res = curl_easy_perform(curl);
++			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
++			curl_easy_cleanup(curl);
++			return res;
++		}
++
++		bool IsOfflineError(CURLcode c)
++		{
++			return c == CURLE_COULDNT_RESOLVE_HOST || c == CURLE_COULDNT_RESOLVE_PROXY || c == CURLE_COULDNT_CONNECT ||
++				   c == CURLE_OPERATION_TIMEDOUT || c == CURLE_SEND_ERROR || c == CURLE_RECV_ERROR || c == CURLE_GOT_NOTHING;
++		}
++
++		bool Sha256Hex(const fs::path& file, std::string& out)
++		{
++			std::ifstream in(file, std::ios::binary);
++			if (!in)
++				return false;
++			EVP_MD_CTX* ctx = EVP_MD_CTX_new();
++			EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
++			std::vector<char> buf(1 << 16);
++			while (in)
++			{
++				in.read(buf.data(), (std::streamsize)buf.size());
++				if (in.gcount() > 0)
++					EVP_DigestUpdate(ctx, buf.data(), (size_t)in.gcount());
++			}
++			unsigned char md[EVP_MAX_MD_SIZE];
++			unsigned int len = 0;
++			EVP_DigestFinal_ex(ctx, md, &len);
++			EVP_MD_CTX_free(ctx);
++			static const char* hex = "0123456789abcdef";
++			out.clear();
++			for (unsigned i = 0; i < len; i++) { out += hex[md[i] >> 4]; out += hex[md[i] & 15]; }
++			return true;
++		}
++
++		bool CanInstall()
++		{
++#if BOOST_OS_WINDOWS
++			// the portable zip has no installation to update in place: it just points people to the new download
++			const char* base = SDL_GetBasePath();
++			std::error_code ec;
++			return !(base && fs::exists(fs::path(base) / "portable.txt", ec));
++#else
++			return false;
++#endif
++		}
++
++		HttpResponse Check()
++		{
++			const std::string current = AppVersion();
++			Json j;
++			j.w.StartObject();
++			j.KS("current", current);
++			std::string body;
++			Sink sink;
++			sink.text = &body;
++			long code = 0;
++			const CURLcode res = Get(std::string("https://api.github.com/repos/") + kRepo + "/releases/latest", sink, 12, code);
++			bool offline = false, available = false;
++			std::string err, latest, notes;
++			if (res != CURLE_OK)
++			{
++				offline = IsOfflineError(res);
++				err = curl_easy_strerror(res);
++			}
++			else if (code == 404)
++			{
++				// no release published yet: nothing to update to
++			}
++			else if (code != 200)
++			{
++				err = "GitHub answered HTTP " + std::to_string(code);
++			}
++			else
++			{
++				rapidjson::Document d;
++				d.Parse(body.c_str());
++				if (!d.HasParseError() && d.IsObject() && d.HasMember("tag_name") && d["tag_name"].IsString())
++				{
++					latest = d["tag_name"].GetString();
++					if (d.HasMember("body") && d["body"].IsString())
++						notes = d["body"].GetString();
++					std::string setupUrl, shaUrl;
++					if (d.HasMember("assets") && d["assets"].IsArray())
++						for (auto& a : d["assets"].GetArray())
++						{
++							if (!a.IsObject() || !a.HasMember("name") || !a["name"].IsString() || !a.HasMember("browser_download_url") || !a["browser_download_url"].IsString())
++								continue;
++							const std::string n = a["name"].GetString(), u = a["browser_download_url"].GetString();
++							if (n == kSetupAsset && UrlAllowed(u)) setupUrl = u;
++							if (n == kShaAsset && UrlAllowed(u)) shaUrl = u;
++						}
++					available = CmpVer(latest, current) > 0 && !setupUrl.empty() && !shaUrl.empty();
++					std::scoped_lock l(g_u.m);
++					g_u.latest = latest;
++					g_u.notes = notes;
++					g_u.setupUrl = setupUrl;
++					g_u.shaUrl = shaUrl;
++				}
++				else
++					err = "unreadable answer from GitHub";
++			}
++			j.KS("latest", latest);
++			j.KB("available", available);
++			j.KB("offline", offline);
++			j.KS("error", err);
++			j.KS("notes", notes.size() > 1500 ? notes.substr(0, 1500) : notes);
++			j.KB("canInstall", CanInstall());
++			j.w.EndObject();
++			return Ok(j);
++		}
++
++		void DownloadWorker(std::string setupUrl, std::string shaUrl, fs::path file)
++		{
++			std::error_code ec;
++			fs::create_directories(file.parent_path(), ec);
++			g_u.percent = 0;
++			SetStage("downloading");
++			{
++				std::ofstream out(file, std::ios::binary | std::ios::trunc);
++				if (!out)
++				{
++					SetStage("error", "can't write the update file");
++					g_u.working = false;
++					return;
++				}
++				Sink sink;
++				sink.file = &out;
++				sink.percent = &g_u.percent;
++				long code = 0;
++				const CURLcode res = Get(setupUrl, sink, 1800, code);
++				out.close();
++				if (res != CURLE_OK || code != 200)
++				{
++					SetStage("error", res != CURLE_OK ? std::string("download failed: ") + curl_easy_strerror(res) : "download failed (HTTP " + std::to_string(code) + ")");
++					fs::remove(file, ec);
++					g_u.working = false;
++					return;
++				}
++			}
++			SetStage("verifying");
++			std::string shaText;
++			{
++				Sink sink;
++				sink.text = &shaText;
++				long code = 0;
++				const CURLcode res = Get(shaUrl, sink, 60, code);
++				if (res != CURLE_OK || code != 200)
++				{
++					SetStage("error", "couldn't fetch the checksum");
++					fs::remove(file, ec);
++					g_u.working = false;
++					return;
++				}
++			}
++			std::string want = Trim(shaText).substr(0, 64);
++			for (auto& c : want) c = (char)std::tolower((unsigned char)c);
++			std::string got;
++			if (want.size() != 64 || !Sha256Hex(file, got) || got != want)
++			{
++				SetStage("error", "the download doesn't match its checksum, so it was discarded");
++				fs::remove(file, ec);
++				g_u.working = false;
++				return;
++			}
++			g_u.percent = 100;
++			SetStage("ready");
++			g_u.working = false;
++		}
++	} // namespace
++
++	std::string AppVersion()
++	{
++		static std::string v;
++		static std::once_flag once;
++		std::call_once(once, []
++		{
++			v = "dev";
++			const char* base = SDL_GetBasePath();
++			if (!base)
++				return;
++			std::ifstream in(fs::path(base) / "version.txt");
++			std::string line;
++			if (in && std::getline(in, line))
++			{
++				line = Trim(line);
++				if (!line.empty() && line.size() < 40)
++					v = line;
++			}
++		});
++		return v;
++	}
++
++	HttpResponse HandleUpdate(const HttpRequest& req, const std::string& sub)
++	{
++		const bool post = req.method == "POST";
++		if (sub == "/check")
++			return Check();
++		if (sub == "/status")
++		{
++			Json j;
++			j.w.StartObject();
++			std::scoped_lock l(g_u.m);
++			j.KS("stage", g_u.stage);
++			j.KI("percent", g_u.percent.load());
++			j.KS("message", g_u.message);
++			j.KS("latest", g_u.latest);
++			j.w.EndObject();
++			return Ok(j);
++		}
++		if (sub == "/install" && post)
++		{
++			if (!CanInstall())
++				return Err(400, "automatic updates are only available in the Windows build");
++			std::string setupUrl, shaUrl;
++			{
++				std::scoped_lock l(g_u.m);
++				setupUrl = g_u.setupUrl;
++				shaUrl = g_u.shaUrl;
++			}
++			if (setupUrl.empty() || shaUrl.empty())
++				return Err(409, "check for updates first");
++			if (g_u.working.exchange(true))
++				return OkSimple();
++			const fs::path file = ActiveSettings::GetUserDataPath() / "update" / kSetupAsset;
++			std::thread(DownloadWorker, setupUrl, shaUrl, file).detach();
++			{
++				std::scoped_lock l(g_u.m);
++				g_u.file = file;
++			}
++			return OkSimple();
++		}
++		if (sub == "/apply" && post)
++		{
++			fs::path file;
++			{
++				std::scoped_lock l(g_u.m);
++				if (g_u.stage != "ready")
++					return Err(409, "update isn't downloaded yet");
++				file = g_u.file;
++			}
++#if BOOST_OS_WINDOWS
++			std::wstring cmd = L"\"" + file.wstring() + L"\" /SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS";
++			STARTUPINFOW si{};
++			si.cb = sizeof(si);
++			PROCESS_INFORMATION pi{};
++			if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &si, &pi))
++				return Err(500, "couldn't start the installer");
++			CloseHandle(pi.hThread);
++			CloseHandle(pi.hProcess);
++			RequestQuit(true);
++			return OkSimple();
++#else
++			return Err(400, "automatic updates are only available in the Windows build");
++#endif
++		}
++		return Err(404, "no such route");
 +	}
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/HttpServer.cpp b/src/gui/sdlgui/HttpServer.cpp

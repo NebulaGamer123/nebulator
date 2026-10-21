@@ -26,7 +26,8 @@ html[data-theme="light"] {
   --pin: #B8923F; --aur1: #7FD9C0; --aur2: #A9C8F0; --aur3: #E0BDF0; --aur-a: .9;
 }
 
-* { box-sizing: border-box; margin: 0; }
+* { box-sizing: border-box; margin: 0; scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; width: 0; height: 0; }
 html, body { height: 100%; }
 body {
   background: var(--bg); color: var(--ink); font-family: var(--sans);

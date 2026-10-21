@@ -3,7 +3,7 @@
 @property --el { syntax: '<color>'; inherits: true; initial-value: #3E8BFF; }
 
 /* ───────── page container ───────── */
-.page { display: none; position: relative; z-index: 4; grid-row: 2 / 4; min-height: 0; overflow: auto; user-select: text; }
+.page { display: none; position: relative; z-index: 4; grid-row: 2 / 4; min-height: 0; overflow-y: auto; overflow-x: hidden; user-select: text; }
 body.page-open .page { display: block; }
 body.page-open .stage, body.page-open .bottom { display: none; }
 .page.page-in { animation: pagein .5s var(--ease) both; }
@@ -86,11 +86,15 @@ body.offline::before { content: "Reconnecting to the core…"; position: fixed; 
 
 /* ───────── skylanders ───────── */
 .sky { position: relative; min-height: 100%; padding: 26px 40px 28px; display: flex; flex-direction: column; gap: 18px; --el: #3E8BFF; transition: --el .9s ease; }
-.sky-bg { position: absolute; inset: 0; z-index: -1; pointer-events: none;
+/* full-window tint behind everything (including the top bar), coloured by the figure's element */
+#tint { position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: 0; transition: opacity .45s ease, --el 1s ease; --el: #3E8BFF;
   background:
     radial-gradient(ellipse 70% 55% at 50% 38%, color-mix(in srgb, var(--el) 34%, transparent), transparent 72%),
     radial-gradient(ellipse 120% 60% at 50% 110%, color-mix(in srgb, var(--el) 18%, transparent), transparent 70%),
     linear-gradient(180deg, color-mix(in srgb, var(--el) 9%, var(--bg)), var(--bg) 80%); }
+body.tint-on #tint { opacity: 1; }
+.sky { overflow: clip; }
+.cgroup { position: sticky; top: 0; z-index: 1; padding: 9px 12px 6px; font: 700 10px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--mute); background: var(--bg); border-bottom: 1px solid var(--line); }
 .sky-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
 .sky-main { position: relative; flex: 1; min-height: 340px; }
 .sky-strip { position: absolute; left: 0; right: 0; top: 0; height: 190px; }
@@ -158,9 +162,11 @@ body.offline::before { content: "Reconnecting to the core…"; position: fixed; 
 .cmain { min-width: 0; }
 .cmain.idle { display: grid; place-items: center; text-align: center; padding: 60px 0; }
 .cdiag { padding: 8px 0 18px; }
-.pad-svg { width: 100%; max-width: 520px; display: block; margin: 0 auto; }
-.pad-svg .shell { fill: color-mix(in srgb, var(--ink) 5%, transparent); stroke: var(--line); stroke-width: 2; }
-.pad-svg .hot { fill: var(--bg2); stroke: var(--mute); stroke-width: 1.5; cursor: pointer; transition: fill .15s, stroke .15s, transform .2s var(--ease); transform-box: fill-box; transform-origin: center; }
+.pad-svg { width: 100%; max-width: 560px; display: block; margin: 0 auto; }
+.pad-svg .shell { fill: color-mix(in srgb, var(--ink) 6%, var(--bg2)); stroke: color-mix(in srgb, var(--ink) 22%, transparent); stroke-width: 2; stroke-linejoin: round; }
+.pad-svg .seam { fill: none; stroke: var(--line); stroke-width: 2; stroke-linecap: round; }
+.pad-svg .dl.sm { font-size: 8px; }
+.pad-svg .hot { fill: var(--bg); stroke: var(--mute); stroke-width: 1.5; cursor: pointer; transition: fill .15s, stroke .15s, transform .2s var(--ease); transform-box: fill-box; transform-origin: center; }
 .pad-svg .hot:hover { stroke: var(--ink); }
 .pad-svg .well { fill: none; stroke: var(--line); stroke-width: 2; }
 .pad-svg .dot { fill: var(--bg2); stroke-width: 1; }
@@ -168,7 +174,7 @@ body.offline::before { content: "Reconnecting to the core…"; position: fixed; 
 .pad-svg .hot.down { fill: var(--accent); stroke: var(--accent); transform: scale(.92); }
 .pad-svg .hot.listen { stroke: var(--accent); stroke-width: 3; animation: listen 0.9s ease-in-out infinite; }
 .pad-svg .hot.flash { animation: flash .6s var(--ease); }
-.pad-svg .dl { fill: var(--mute); font: 700 11px var(--mono); pointer-events: none; }
+.pad-svg .dl { fill: var(--mute); font: 700 12px var(--mono); pointer-events: none; }
 @keyframes listen { 50% { fill: color-mix(in srgb, var(--accent) 35%, var(--bg2)); } }
 @keyframes flash { 0% { fill: var(--accent); } 100% { fill: var(--bg2); } }
 .bgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 22px 26px; }
@@ -237,3 +243,5 @@ body.offline::before { content: "Reconnecting to the core…"; position: fixed; 
 
 .uh .gicon { width: 44px; height: 44px; margin: 0 12px 0 0; border-radius: 8px; opacity: 0; }
 .uh .gicon.on { opacity: 1; }
+
+.notes { max-height: 160px; overflow: auto; margin: 4px 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 3px; background: var(--bg); font: 12px/1.5 var(--mono); white-space: pre-wrap; color: var(--mute); }

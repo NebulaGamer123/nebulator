@@ -4,10 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+    paths-ignore: ['**.md']
+
+permissions:
+  contents: write   # lets the build publish the installer as a GitHub Release (that's what the in-app updater downloads)
 
 env:
   CEMU_COMMIT: a53cf0e
-  APP_VERSION: "0.2"
 
 jobs:
   windows:
@@ -21,6 +24,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: overlay
+
+      - name: Work out the version (0.2.<build number>)
+        shell: bash
+        run: echo "APP_VERSION=0.2.${{ github.run_number }}" >> "$GITHUB_ENV"
 
       - name: Fetch Cemu sources (pinned commit)
         shell: bash
@@ -97,6 +104,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path stage | Out-Null
           Get-ChildItem cemu\bin\*.exe | ForEach-Object { Write-Host "built:" $_.Name }
           Copy-Item cemu\bin\nebulator-core.exe stage\
+          Set-Content -Path stage\version.txt -Value $env:APP_VERSION -NoNewline
           Copy-Item cemu\bin\ui stage\ui -Recurse
           Copy-Item cemu\bin\resources stage\resources -Recurse
           Copy-Item cemu\bin\gameProfiles stage\gameProfiles -Recurse
@@ -106,6 +114,12 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:APP_VERSION" "/DStageDir=$PWD\stage" overlay\installer\nebulator.iss
+
+      - name: Checksum for the in-app updater
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash overlay\out\NEBULATOR-Setup.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path overlay\out\NEBULATOR-Setup.exe.sha256 -Value $h -NoNewline
 
       - name: Make portable zip
         shell: pwsh
@@ -124,3 +138,14 @@ jobs:
         with:
           name: NEBULATOR-portable
           path: overlay/out/NEBULATOR-portable.zip
+
+      - name: Publish release (what the app's updater looks for)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          $notes = if ($env:COMMIT_MSG) { $env:COMMIT_MSG } else { "NEBULATOR $env:APP_VERSION" }
+          gh release create "v$env:APP_VERSION" `
+            overlay/out/NEBULATOR-Setup.exe overlay/out/NEBULATOR-Setup.exe.sha256 overlay/out/NEBULATOR-portable.zip `
+            --repo "${{ github.repository }}" --title "NEBULATOR $env:APP_VERSION" --notes "$notes" --target "${{ github.sha }}"

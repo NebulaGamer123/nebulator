@@ -44,7 +44,7 @@ Name: "{group}\Uninstall NEBULATOR"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\NEBULATOR"; Filename: "{app}\nebulator-core.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\nebulator-core.exe"; Description: "Launch NEBULATOR"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\nebulator-core.exe"; Description: "Launch NEBULATOR"; Flags: nowait postinstall
 
 [Code]
 // ---- prerequisite checks -------------------------------------------------------------------

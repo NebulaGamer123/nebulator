@@ -71,14 +71,39 @@
       glyph: 'M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12v9M12 12l8-4.5M12 12L4 7.5' },
   };
 
-  const gameOf = id => id < 33 ? "Spyro's Adventure" : id < 200 ? 'Giants' : id < 400 ? 'Items & adventure packs' : id < 450 ? 'Legendary'
-    : id < 500 ? 'Swap Force' : id < 600 ? 'Minis' : id < 700 ? 'Trap Team' : id < 3000 ? 'Swap Force' : id < 3200 ? 'SuperChargers'
-    : id < 3400 ? 'SuperChargers vehicles' : id < 3500 ? 'SuperChargers' : 'SuperChargers';
+  // Which game a figure belongs to, by figure id. Checked against the Skylanders wikis:
+  //   Trap Masters (450-485) and Minis (502-543) are Trap Team, villains/senseis 601-631 are Imaginators,
+  //   3000-3015 and the 1000/2000 swappers are Swap Force, 3400s are SuperChargers.
+  const SA = "Spyro's Adventure", GI = 'Giants', SF = 'Swap Force', TT = 'Trap Team', SCH = 'SuperChargers', IM = 'Imaginators';
+  const gameOf = id =>
+    id <= 32 ? SA :
+    id <= 115 ? GI :
+    id <= 207 ? SA + ' · magic item' :
+    id <= 209 ? GI + ' · battle pack' :
+    id <= 220 ? TT + ' · trap' :
+    id <= 233 ? TT + ' · magic item' :
+    id <= 304 ? SA + ' · adventure pack' :
+    id <= 308 ? TT + ' · adventure pack' :
+    id <= 430 ? 'Legendary' :
+    id <= 485 ? TT + ' · Trap Master' :
+    id <= 543 ? TT + ' · Mini' :
+    id <= 631 ? IM + ' · Sensei' :
+    id <= 2015 ? SF + ' · swap half' :
+    id <= 3015 ? SF :
+    id <= 3204 ? SF + ' · magic item' :
+    id <= 3241 ? SCH + ' · vehicle' :
+    id <= 3301 ? SF + ' · adventure pack' :
+    id <= 3303 ? GI + ' · battle pack' :
+    id <= 3428 ? SCH :
+    SCH + ' · trophy';
+  // sort order for the picker: by game, then id
+  const GAME_ORDER = [SA, 'Legendary', GI, SF, TT, SCH, IM];
+  const gameRank = id => { const g = gameOf(id), i = GAME_ORDER.findIndex(x => g.startsWith(x)); return i < 0 ? 99 : i; };
 
   window.SKY = {
     EL,
     element: id => EL[E[id] || 'neutral'],
     elementKey: id => E[id] || 'neutral',
-    gameOf,
+    gameOf, gameRank,
   };
 })();

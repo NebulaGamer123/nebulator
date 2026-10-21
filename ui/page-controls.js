@@ -124,27 +124,30 @@
   const NS = 'http://www.w3.org/2000/svg';
   function diagram() {
     const s = document.createElementNS(NS, 'svg');
-    s.setAttribute('viewBox', '0 0 440 270'); s.setAttribute('class', 'pad-svg');
+    s.setAttribute('viewBox', '0 0 480 290'); s.setAttribute('class', 'pad-svg');
     const el = (tag, attrs, b) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (b) { e.dataset.b = b; e.setAttribute('class', 'hot'); } return e; };
-    const txt = (x, y, t) => { const e = el('text', { x, y, 'text-anchor': 'middle', 'dominant-baseline': 'central', class: 'dl' }); e.textContent = t; return e; };
-    s.append(el('path', { d: 'M70 70h300q50 0 62 60l14 90q4 34-28 30-22-2-34-30l-14-30H160l-14 30q-12 28-34 30-32 4-28-30l14-90q12-60 62-60z', class: 'shell' }));
-    // shoulders
-    s.append(el('rect', { x: 58, y: 28, width: 70, height: 20, rx: 6 }, 'ZL'), txt(93, 38, 'ZL'));
-    s.append(el('rect', { x: 312, y: 28, width: 70, height: 20, rx: 6 }, 'ZR'), txt(347, 38, 'ZR'));
-    s.append(el('rect', { x: 62, y: 52, width: 78, height: 14, rx: 6 }, 'L'), txt(101, 59, 'L'));
-    s.append(el('rect', { x: 300, y: 52, width: 78, height: 14, rx: 6 }, 'R'), txt(339, 59, 'R'));
-    // left stick + dpad
-    s.append(el('circle', { cx: 100, cy: 108, r: 26, class: 'well' }), el('circle', { cx: 100, cy: 108, r: 15 }, 'LClick'));
-    [['LUp', 100, 78], ['LDown', 100, 138], ['LLeft', 70, 108], ['LRight', 130, 108]].forEach(([b, x, y]) => s.append(el('circle', { cx: x, cy: y, r: 5, class: 'dot' }, b)));
-    s.append(el('rect', { x: 128, y: 150, width: 18, height: 18, rx: 3 }, 'Up'), el('rect', { x: 128, y: 190, width: 18, height: 18, rx: 3 }, 'Down'),
-      el('rect', { x: 106, y: 170, width: 18, height: 18, rx: 3 }, 'Left'), el('rect', { x: 150, y: 170, width: 18, height: 18, rx: 3 }, 'Right'));
+    const txt = (x, y, t, cls) => { const e = el('text', { x, y, 'text-anchor': 'middle', 'dominant-baseline': 'central', class: cls || 'dl' }); e.textContent = t; return e; };
+    // body: symmetric pro-controller silhouette with two grips
+    s.append(el('path', { d: 'M110 68H370C402 68 416 84 424 118L446 214C452 248 436 264 414 264C394 264 382 252 374 238L362 222C357 215 351 212 343 212H137C129 212 123 215 118 222L106 238C98 252 86 264 66 264C44 264 28 248 34 214L56 118C64 84 78 68 110 68Z', class: 'shell' }));
+    s.append(el('path', { d: 'M137 212H343', class: 'seam' }));
+    // triggers and bumpers
+    s.append(el('rect', { x: 66, y: 16, width: 96, height: 24, rx: 9 }, 'ZL'), txt(114, 28, 'ZL'));
+    s.append(el('rect', { x: 318, y: 16, width: 96, height: 24, rx: 9 }, 'ZR'), txt(366, 28, 'ZR'));
+    s.append(el('rect', { x: 70, y: 46, width: 100, height: 16, rx: 8 }, 'L'), txt(120, 54, 'L'));
+    s.append(el('rect', { x: 310, y: 46, width: 100, height: 16, rx: 8 }, 'R'), txt(360, 54, 'R'));
+    // left stick (click + four directions)
+    s.append(el('circle', { cx: 118, cy: 116, r: 30, class: 'well' }), el('circle', { cx: 118, cy: 116, r: 18 }, 'LClick'));
+    [['LUp', 118, 80], ['LDown', 118, 152], ['LLeft', 82, 116], ['LRight', 154, 116]].forEach(([b, x, y]) => s.append(el('circle', { cx: x, cy: y, r: 5.5, class: 'dot' }, b)));
+    // d-pad
+    [['Up', 178, 150, '▲'], ['Down', 178, 194, '▼'], ['Left', 156, 172, '◀'], ['Right', 200, 172, '▶']].forEach(([b, x, y, g]) =>
+      s.append(el('rect', { x: x - 11, y: y - 11, width: 22, height: 22, rx: 5 }, b), txt(x, y + .5, g, 'dl sm')));
     // right stick
-    s.append(el('circle', { cx: 290, cy: 190, r: 26, class: 'well' }), el('circle', { cx: 290, cy: 190, r: 15 }, 'RClick'));
-    [['RUp', 290, 160], ['RDown', 290, 220], ['RLeft', 260, 190], ['RRight', 320, 190]].forEach(([b, x, y]) => s.append(el('circle', { cx: x, cy: y, r: 5, class: 'dot' }, b)));
-    // face
-    [['X', 342, 82], ['B', 342, 126], ['Y', 320, 104], ['A', 364, 104]].forEach(([b, x, y]) => s.append(el('circle', { cx: x, cy: y, r: 13 }, b), txt(x, y, b)));
-    // system
-    s.append(el('circle', { cx: 186, cy: 100, r: 8 }, 'Minus'), txt(186, 100, '−'), el('circle', { cx: 254, cy: 100, r: 8 }, 'Plus'), txt(254, 100, '+'), el('circle', { cx: 220, cy: 124, r: 9 }, 'Home'));
+    s.append(el('circle', { cx: 302, cy: 168, r: 30, class: 'well' }), el('circle', { cx: 302, cy: 168, r: 18 }, 'RClick'));
+    [['RUp', 302, 134], ['RDown', 302, 202], ['RLeft', 268, 168], ['RRight', 336, 168]].forEach(([b, x, y]) => s.append(el('circle', { cx: x, cy: y, r: 5.5, class: 'dot' }, b)));
+    // face buttons
+    [['X', 362, 88], ['B', 362, 136], ['Y', 338, 112], ['A', 386, 112]].forEach(([b, x, y]) => s.append(el('circle', { cx: x, cy: y, r: 13 }, b), txt(x, y + .5, b)));
+    // system buttons
+    s.append(el('circle', { cx: 212, cy: 100, r: 9 }, 'Minus'), txt(212, 100, '−'), el('circle', { cx: 268, cy: 100, r: 9 }, 'Plus'), txt(268, 100, '+'), el('circle', { cx: 240, cy: 134, r: 11 }, 'Home'), txt(240, 134.5, '⌂', 'dl sm'));
     s.addEventListener('click', e => { const t = e.target.closest('[data-b]'); if (t) { SFX.select(); startListening(t.dataset.b); } });
     return s;
   }
