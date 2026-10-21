@@ -34,6 +34,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "{#StageDir}\nebulator-core.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\version.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\ui\*"; DestDir: "{app}\ui"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\resources\*"; DestDir: "{app}\resources"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\gameProfiles\*"; DestDir: "{app}\gameProfiles"; Flags: ignoreversion recursesubdirs createallsubdirs

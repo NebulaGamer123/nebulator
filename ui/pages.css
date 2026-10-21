@@ -85,7 +85,7 @@ input[type="text"].search { max-width: 280px; }
 body.offline::before { content: "Reconnecting to the core…"; position: fixed; z-index: 70; top: 12px; left: 50%; transform: translateX(-50%); padding: 7px 12px; background: var(--ink); color: var(--bg); border-radius: 3px; font: 600 11px/1 var(--mono); letter-spacing: .08em; }
 
 /* ───────── skylanders ───────── */
-.sky { position: relative; min-height: 100%; padding: 26px 40px 28px; display: flex; flex-direction: column; gap: 18px; --el: #3E8BFF; transition: --el .9s ease; }
+.sky { position: relative; min-height: 100%; padding: 26px 40px 44px; display: flex; flex-direction: column; gap: 18px; --el: #3E8BFF; transition: --el .9s ease; }
 /* full-window tint behind everything (including the top bar), coloured by the figure's element */
 #tint { position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: 0; transition: opacity .45s ease, --el 1s ease; --el: #3E8BFF;
   background:
@@ -135,7 +135,7 @@ body.tint-on #tint { opacity: 1; }
 .pad.ping::after, .pad.pong::after { content: ""; position: absolute; inset: -2px; border-radius: 50%; border: 2px solid var(--pc); animation: ripple .7s var(--ease) both; pointer-events: none; }
 .pad.pong::after { animation-direction: reverse; }
 @keyframes ripple { from { transform: scale(.6); opacity: .9; } to { transform: scale(1.9); opacity: 0; } }
-.sky-portal { margin-bottom: 18px; }
+.sky-portal { margin-bottom: 18px; padding-bottom: 38px; }
 .empty .ring.big { width: 120px; height: 120px; padding: 30px; border: 2px solid var(--line); color: var(--mute); margin-bottom: 14px; }
 .empty .btn { margin-top: 6px; }
 

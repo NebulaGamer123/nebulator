@@ -49,7 +49,7 @@
     theme: 'nebula', sound: true, dust: true, size: 1, sys: 'wiiu', last: {}, fullscreen: false,
     motion: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduced' : 'full',
   }, store.get('state', {}));
-  if (!SYSTEMS.some(s => s.id === S.sys)) S.sys = 'wiiu';
+  S.sys = 'wiiu'; // always start on the Wii U shelf, whatever tab was open last time
   if (!THEME_NAMES[S.theme]) S.theme = 'nebula';
   const save = () => store.set('state', S);
   document.documentElement.dataset.theme = S.theme;
@@ -214,7 +214,7 @@
     if (id === S.sys && (pageId === id || !sysOf(id).page)) return;
     const oldI = SYSTEMS.findIndex(s => s.id === S.sys), newI = SYSTEMS.findIndex(s => s.id === id);
     const dir = newI > oldI ? 1 : -1;
-    S.sys = id; save(); SFX.tab();
+    S.sys = id; save(); SFX.tab(); syncRunning();
     rail.querySelectorAll('.sys').forEach(b => b.classList.toggle('on', b.dataset.id === id));
     moveInd();
     if (id !== 'settings' && sheetOpen) closeSheet();
@@ -348,18 +348,35 @@
   NEB.toast = toast;
 
   /* ───────── running / offline overlay ───────── */
+  // while a game runs, only these sections stay usable (they act on the running game); the rest show the "now playing" card
+  const LIVE_SECTIONS = new Set(['skylanders', 'controls']);
+  let runChip = null;
   function showRunning(state) {
+    runningEl.style.top = ($('.top') ? $('.top').offsetHeight : 64) + 'px'; // keep the section tabs clickable
     runningEl.replaceChildren(
       h('div', { class: 'run-card' },
         h('div', { class: 'run-led' }),
         h('div', { class: 'run-k' }, state === 'loading' ? 'Starting' : 'Now playing'),
         h('div', { class: 'run-t' }, firstLine(NEB.status.title) || 'Game'),
-        h('p', { class: 'run-p' }, 'The game is in its own window. This menu comes back when you close it.'),
+        h('p', { class: 'run-p' }, 'The game is in its own window. Skylanders and Controls stay available while you play; this menu comes back fully when you close the game.'),
         h('button', { class: 'btn danger', onclick: () => NEB.api('quit', { app: false }).catch(() => {}) }, 'Stop game')));
     runningEl.classList.add('show'); runningEl.setAttribute('aria-hidden', 'false');
   }
   function hideRunning() { runningEl.classList.remove('show'); runningEl.setAttribute('aria-hidden', 'true'); }
-  NEB.on('state', st => { if (st === 'ui') { hideRunning(); loadLibrary(); } else showRunning(st); });
+  function syncRunning() {
+    const st = NEB.state;
+    if (st === 'ui') {
+      if (runChip) { runChip.remove(); runChip = null; }
+      return hideRunning();
+    }
+    if (!runChip) {
+      runChip = h('button', { class: 'runchip', title: 'A game is running. Click to stop it.', onclick: () => NEB.api('quit', { app: false }).catch(() => {}) },
+        h('i'), h('b', null, 'Stop game'));
+      const tools = $('.tools'); if (tools) tools.prepend(runChip);
+    }
+    if (LIVE_SECTIONS.has(S.sys)) hideRunning(); else showRunning(st);
+  }
+  NEB.on('state', st => { if (st === 'ui') loadLibrary(); syncRunning(); });
   NEB.on('status', st => {
     if (st.error && st.error !== NEB._lastErr) { NEB._lastErr = st.error; SFX.error(); toast(st.error.split('\n')[0]); }
     if (!st.error) NEB._lastErr = '';
