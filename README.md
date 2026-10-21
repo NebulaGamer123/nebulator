@@ -30,3 +30,10 @@ You don't install Visual Studio, CMake or anything else on your PC.
   text and send it to me; I'll fix it.
 - You still supply your own game files and Wii U `keys.txt`; NEBULATOR doesn't include or download games.
 - See `CORE-NOTES.md` for what is and isn't verified.
+
+## Co-op (same Wi-Fi)
+
+Open the **Co-op** tab. One person presses *Start hosting* and shares the 5-letter code; friends on the same Wi-Fi open
+NEBULATOR, press *Search* (or type the host's address), enter the code and *Join*. Guests need no game: they see and hear
+the host's game and their keyboard/gamepad appears on the host as player 2-4. Ports: TCP 17800, UDP 17801 (allow
+NEBULATOR on *Private* networks when Windows asks). Internet play is not included yet.

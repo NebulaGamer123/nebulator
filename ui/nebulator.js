@@ -29,6 +29,7 @@
     { id: 'wii',        name: 'Wii',           color: '#7FA6C4', soon: true },
     { id: 'skylanders', name: 'Skylanders',    page: true },
     { id: 'controls',   name: 'Controls',      page: true },
+    { id: 'coop',       name: 'Co-op',         page: true },
     { id: 'gfx',        name: 'Graphics',      page: true },
     { id: 'updates',    name: 'Updates & DLC', page: true },
     { id: 'settings',   name: 'Settings',      color: '#B8B09A' },
@@ -239,7 +240,7 @@
   };
 
   /* ───────── input ───────── */
-  const blocked = () => document.body.classList.contains('page-open') || document.body.classList.contains('modal-open');
+  const blocked = () => document.body.classList.contains('page-open') || document.body.classList.contains('modal-open') || document.body.classList.contains('coop-view');
   let px0 = 0, lastX = 0, lastT = 0, pos0 = 0, moved = 0, dv = 0, downEl = null, wheelLock = 0;
   stage.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
@@ -349,7 +350,7 @@
 
   /* ───────── running / offline overlay ───────── */
   // while a game runs, only these sections stay usable (they act on the running game); the rest show the "now playing" card
-  const LIVE_SECTIONS = new Set(['skylanders', 'controls']);
+  const LIVE_SECTIONS = new Set(['skylanders', 'controls', 'coop']);
   let runChip = null;
   function showRunning(state) {
     runningEl.style.top = ($('.top') ? $('.top').offsetHeight : 64) + 'px'; // keep the section tabs clickable
@@ -358,7 +359,7 @@
         h('div', { class: 'run-led' }),
         h('div', { class: 'run-k' }, state === 'loading' ? 'Starting' : 'Now playing'),
         h('div', { class: 'run-t' }, firstLine(NEB.status.title) || 'Game'),
-        h('p', { class: 'run-p' }, 'The game is in its own window. Skylanders and Controls stay available while you play; this menu comes back fully when you close the game.'),
+        h('p', { class: 'run-p' }, 'The game is in its own window. Skylanders, Controls and Co-op stay available while you play; this menu comes back fully when you close the game.'),
         h('button', { class: 'btn danger', onclick: () => NEB.api('quit', { app: false }).catch(() => {}) }, 'Stop game')));
     runningEl.classList.add('show'); runningEl.setAttribute('aria-hidden', 'false');
   }

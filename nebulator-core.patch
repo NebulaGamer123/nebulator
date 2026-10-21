@@ -65,16 +65,18 @@ index 644032c..539ee5b 100644
  	if (NOT ENABLE_VCPKG)
  	    find_package(cubeb)
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index d8378c3..4a66880 100644
+index d8378c3..aab352c 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -67,6 +67,14 @@ add_subdirectory(resource)
+@@ -67,6 +67,16 @@ add_subdirectory(resource)
  add_executable(CemuBin
  	main.cpp
  	mainLLE.cpp
 +	gui/sdlgui/SdlWindowSystem.cpp
 +	gui/sdlgui/LinuxLtoShim.cpp
 +	gui/sdlgui/ControlUpdate.cpp
++	gui/sdlgui/ControlCoop.cpp
++	gui/sdlgui/JpegEnc.cpp
 +	gui/sdlgui/HttpServer.cpp
 +	gui/sdlgui/ControlApi.cpp
 +	gui/sdlgui/ControlInput.cpp
@@ -83,7 +85,7 @@ index d8378c3..4a66880 100644
  )
  
  cemu_use_precompiled_header(CemuBin)
-@@ -94,7 +102,7 @@ string(TIMESTAMP CURRENT_YEAR "%Y" UTC)
+@@ -94,7 +104,7 @@ string(TIMESTAMP CURRENT_YEAR "%Y" UTC)
  
  set_property(TARGET CemuBin PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
  set_property(TARGET CemuBin PROPERTY WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>)
@@ -92,7 +94,7 @@ index d8378c3..4a66880 100644
  
  if (MACOS_BUNDLE)
  	set_property(TARGET CemuBin PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resource/MacOSXBundleInfo.plist.in")
-@@ -215,6 +223,8 @@ target_link_libraries(CemuBin PRIVATE
+@@ -215,6 +225,8 @@ target_link_libraries(CemuBin PRIVATE
  	CemuGui
  	CemuInput
  	CemuUtil
@@ -101,7 +103,7 @@ index d8378c3..4a66880 100644
  )
  
  if(UNIX AND NOT APPLE)
-@@ -229,3 +239,13 @@ endif()
+@@ -229,3 +241,13 @@ endif()
  if (BSD)
  	target_link_libraries(CemuBin PRIVATE execinfo SPIRV-Tools SPIRV-Tools-opt)
  endif()
@@ -115,6 +117,206 @@ index d8378c3..4a66880 100644
 +
 +# the removed wx GUI used to link CemuResource (default font data, extractCafeDefaultFont); every platform needs it
 +target_link_libraries(CemuBin PRIVATE CemuResource)
+diff --git a/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp b/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp
+index f1556f8..2a4bd5b 100644
+--- a/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp
+@@ -965,6 +965,7 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
+ 	cemu_assert(shader);
+ 	g_renderer->DrawBackbufferQuad(textureView, shader, filter==LatteTextureView::MagFilter::kLinear, imageX, imageY, imageWidth, imageHeight, isPadView, clearBackground);
+ 	g_renderer->HandleScreenshotRequest(textureView, isPadView);
++	g_renderer->HandleCoopCapture(textureView, isPadView);
+ 	if (!g_renderer->ImguiBegin(!isPadView))
+ 		return;
+ 	swkbd_render(!isPadView);
+diff --git a/src/Cafe/HW/Latte/Renderer/Renderer.h b/src/Cafe/HW/Latte/Renderer/Renderer.h
+index fa77fd9..a3c3709 100644
+--- a/src/Cafe/HW/Latte/Renderer/Renderer.h
++++ b/src/Cafe/HW/Latte/Renderer/Renderer.h
+@@ -73,6 +73,8 @@ public:
+ 	void CancelScreenshotRequest();
+ 
+ 	virtual void HandleScreenshotRequest(LatteTextureView* texView, bool padView){}
++	// NEBULATOR co-op: hands a downscaled copy of the TV picture to the stream encoder (no-op unless a guest is watching)
++	virtual void HandleCoopCapture(LatteTextureView* texView, bool padView){}
+ 
+ 	virtual void DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter,
+ 												sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight,
+diff --git a/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp b/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp
+index 599190a..0f987a4 100644
+--- a/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp
++++ b/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp
+@@ -1,3 +1,4 @@
++#include "gui/sdlgui/ControlCoop.h"
+ #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
+ #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
+ #include "Cafe/HW/Latte/Renderer/Vulkan/LatteTextureVk.h"
+@@ -1277,6 +1278,153 @@ void VulkanRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool pad
+ 		SaveScreenshot(rgb_data, width, height, !padView);
+ }
+ 
++void VulkanRenderer::HandleCoopCapture(LatteTextureView* texView, bool padView)
++{
++	if (padView || !Coop::WantFrame())
++		return;
++	auto texViewVk = (LatteTextureViewVk*)texView;
++	auto baseImageTex = texViewVk->GetBaseImage();
++	if (texViewVk->firstMip != 0)
++		return;
++	auto textureVk = baseImageTex->GetImageObj();
++	textureVk->flagForCurrentCommandBuffer();
++	auto srcImage = textureVk->m_image;
++
++	int width, height;
++	baseImageTex->GetEffectiveSize(width, height, 0);
++	if (width <= 0 || height <= 0)
++		return;
++	const int maxW = std::max(160, Coop::MaxWidth());
++	int dw = std::min(width, maxW);
++	int dh = std::max(2, (int)((int64_t)height * dw / width));
++	dw &= ~1;
++	dh &= ~1;
++
++	const auto srcFormat = baseImageTex->GetFormat();
++	VkFormatProperties formatProps;
++	vkGetPhysicalDeviceFormatProperties(m_physicalDevice, srcFormat, &formatProps);
++	if (!(formatProps.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT))
++		return;
++	const bool dstUsesSRGB = LatteGPUState.tvBufferUsesSRGB;
++	const auto blitFormat = dstUsesSRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
++	vkGetPhysicalDeviceFormatProperties(m_physicalDevice, blitFormat, &formatProps);
++	if (!(formatProps.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT))
++		return;
++
++	VkImageCreateInfo imageInfo{};
++	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++	imageInfo.format = blitFormat;
++	imageInfo.extent = {(uint32)dw, (uint32)dh, 1};
++	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
++	imageInfo.arrayLayers = 1;
++	imageInfo.mipLevels = 1;
++	imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++	imageInfo.imageType = VK_IMAGE_TYPE_2D;
++	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
++	VkImage image = nullptr;
++	if (vkCreateImage(m_logicalDevice, &imageInfo, nullptr, &image) != VK_SUCCESS)
++		return;
++	VkMemoryRequirements memRequirements;
++	vkGetImageMemoryRequirements(m_logicalDevice, image, &memRequirements);
++	VkMemoryAllocateInfo allocInfo{};
++	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++	allocInfo.allocationSize = memRequirements.size;
++	uint32 memIndex;
++	if (!memoryManager->FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memIndex))
++	{
++		vkDestroyImage(m_logicalDevice, image, nullptr);
++		return;
++	}
++	allocInfo.memoryTypeIndex = memIndex;
++	VkDeviceMemory imageMemory = nullptr;
++	if (vkAllocateMemory(m_logicalDevice, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS)
++	{
++		vkDestroyImage(m_logicalDevice, image, nullptr);
++		return;
++	}
++	vkBindImageMemory(m_logicalDevice, image, imageMemory, 0);
++
++	{
++		VkImageSubresourceRange range;
++		range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++		range.baseMipLevel = 0;
++		range.levelCount = 1;
++		range.baseArrayLayer = 0;
++		range.layerCount = 1;
++		barrier_image<TRANSFER_READ, TRANSFER_WRITE>(image, range, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++	}
++	{
++		VkImageSubresourceLayers range;
++		range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++		range.mipLevel = 0;
++		range.baseArrayLayer = texViewVk->firstSlice;
++		range.layerCount = 1;
++		barrier_image<IMAGE_WRITE | TRANSFER_WRITE, SYNC_OP::TRANSFER_READ>(baseImageTex, range, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++	}
++	VkImageBlit blit{};
++	blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++	blit.srcSubresource.mipLevel = 0;
++	blit.srcSubresource.baseArrayLayer = texViewVk->firstSlice;
++	blit.srcSubresource.layerCount = 1;
++	blit.srcOffsets[1] = {width, height, 1};
++	blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++	blit.dstSubresource.mipLevel = 0;
++	blit.dstSubresource.baseArrayLayer = 0;
++	blit.dstSubresource.layerCount = 1;
++	blit.dstOffsets[1] = {dw, dh, 1};
++	vkCmdBlitImage(m_state.currentCommandBuffer, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
++	{
++		VkImageSubresourceRange range;
++		range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++		range.baseMipLevel = 0;
++		range.levelCount = 1;
++		range.baseArrayLayer = 0;
++		range.layerCount = 1;
++		barrier_image<TRANSFER_WRITE, TRANSFER_READ>(image, range, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
++	}
++	{
++		VkImageSubresourceLayers range;
++		range.aspectMask = baseImageTex->GetImageAspect();
++		range.mipLevel = 0;
++		range.baseArrayLayer = texViewVk->firstSlice;
++		range.layerCount = 1;
++		barrier_image<TRANSFER_READ, TRANSFER_WRITE | IMAGE_WRITE>(baseImageTex, range, baseImageTex->GetDefaultLayout());
++	}
++
++	const uint32 size = 4u * dw * dh;
++	VkBufferImageCopy region{};
++	region.bufferRowLength = dw;
++	region.bufferImageHeight = dh;
++	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++	region.imageSubresource.layerCount = 1;
++	region.imageExtent = {(uint32)dw, (uint32)dh, 1};
++	void* bufferPtr = nullptr;
++	VkBuffer buffer = nullptr;
++	VkDeviceMemory bufferMemory = nullptr;
++	memoryManager->CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, buffer, bufferMemory);
++	vkMapMemory(m_logicalDevice, bufferMemory, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
++	vkCmdCopyImageToBuffer(m_state.currentCommandBuffer, image, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
++	SubmitCommandBuffer();
++	WaitCommandBufferFinished(GetCurrentCommandBufferId());
++
++	std::vector<uint8> rgb((size_t)3 * dw * dh);
++	const uint8* src = (const uint8*)bufferPtr;
++	for (size_t i = 0, n = (size_t)dw * dh; i < n; i++)
++	{
++		rgb[i * 3 + 0] = src[i * 4 + 0];
++		rgb[i * 3 + 1] = src[i * 4 + 1];
++		rgb[i * 3 + 2] = src[i * 4 + 2];
++	}
++	vkUnmapMemory(m_logicalDevice, bufferMemory);
++	vkFreeMemory(m_logicalDevice, bufferMemory, nullptr);
++	vkDestroyBuffer(m_logicalDevice, buffer, nullptr);
++	vkDestroyImage(m_logicalDevice, image, nullptr);
++	vkFreeMemory(m_logicalDevice, imageMemory, nullptr);
++	Coop::SubmitFrame(rgb.data(), dw, dh);
++}
++
+ static const float kQueuePriority = 1.0f;
+ 
+ std::vector<VkDeviceQueueCreateInfo> VulkanRenderer::CreateQueueCreateInfos(const std::set<sint32>& uniqueQueueFamilies) const
+diff --git a/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h b/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h
+index d975e11..d547ac5 100644
+--- a/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h
++++ b/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h
+@@ -205,6 +205,7 @@ public:
+ 	bool IsPadWindowActive() override;
+ 
+ 	void HandleScreenshotRequest(LatteTextureView* texView, bool padView) override;
++	void HandleCoopCapture(LatteTextureView* texView, bool padView) override;
+ 
+ 	void QueryMemoryInfo();
+ 	void QueryAvailableFormats();
 diff --git a/src/Cafe/OS/libs/nsyshid/Skylander.cpp b/src/Cafe/OS/libs/nsyshid/Skylander.cpp
 index 7833796..0970f0c 100644
 --- a/src/Cafe/OS/libs/nsyshid/Skylander.cpp
@@ -131,6 +333,38 @@ index 7833796..0970f0c 100644
  	}
  } // namespace nsyshid
 \ No newline at end of file
+diff --git a/src/Cafe/OS/libs/snd_core/ax_out.cpp b/src/Cafe/OS/libs/snd_core/ax_out.cpp
+index 6cb1599..dfdb34f 100644
+--- a/src/Cafe/OS/libs/snd_core/ax_out.cpp
++++ b/src/Cafe/OS/libs/snd_core/ax_out.cpp
+@@ -2,6 +2,7 @@
+ #include "Cafe/OS/libs/snd_core/ax_internal.h"
+ #include "Cafe/HW/MMU/MMU.h"
+ #include "audio/IAudioAPI.h"
++#include "gui/sdlgui/ControlCoop.h"
+ //#include "ax.h"
+ #include "config/CemuConfig.h"
+ 
+@@ -186,6 +187,19 @@ namespace snd_core
+ 			if(g_tvAudio)
+ 				g_tvAudio->FeedBlock(tempTVChannelData);
+ 
++			if (Coop::HasGuests())
++			{
++				// NEBULATOR co-op: send the TV mix to guests as stereo (first two channels when the game mixes more)
++				const sint32 frames = AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP;
++				static sint16 stereo[AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * 2];
++				for (sint32 i = 0; i < frames; i++)
++				{
++					stereo[i * 2] = tempTVChannelData[i * channels];
++					stereo[i * 2 + 1] = channels > 1 ? tempTVChannelData[i * channels + 1] : tempTVChannelData[i * channels];
++				}
++				Coop::SubmitAudio(stereo, frames);
++			}
++
+ 			tempAudioBlockCounter = 0;
+ 		}
+ 	}
 diff --git a/src/gui/CMakeLists.txt b/src/gui/CMakeLists.txt
 index d66e971..593c886 100644
 --- a/src/gui/CMakeLists.txt
@@ -147,10 +381,10 @@ index d66e971..593c886 100644
 -endif()
 diff --git a/src/gui/sdlgui/ControlApi.cpp b/src/gui/sdlgui/ControlApi.cpp
 new file mode 100644
-index 0000000..b3dacc2
+index 0000000..b9b7cbd
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.cpp
-@@ -0,0 +1,658 @@
+@@ -0,0 +1,665 @@
 +#include "ControlApi.h"
 +
 +#include "config/ActiveSettings.h"
@@ -744,6 +978,7 @@ index 0000000..b3dacc2
 +	}
 +	State GetState() { return g_cb.state ? g_cb.state() : State::Ui; }
 +	const std::string& GetToken() { return g_token; }
++	std::string CurrentTitle() { return g_cb.currentTitle ? g_cb.currentTitle() : ""; }
 +
 +	// ====================================================================== router
 +	HttpResponse Handle(const HttpRequest& req)
@@ -755,7 +990,11 @@ index 0000000..b3dacc2
 +			return ServeStatic(req.path);
 +		}
 +		auto tok = req.headers.find("x-nebulator-token");
-+		if (tok == req.headers.end() || g_token.empty() || tok->second != g_token)
++		std::string given = tok == req.headers.end() ? "" : tok->second;
++		// <img>/<audio> style streams can't send headers: they pass the token in the query string
++		if (given.empty() && (req.path == "/api/coop/stream" || req.path == "/api/coop/audio"))
++			given = QueryParam(req, "t");
++		if (given.empty() || g_token.empty() || given != g_token)
 +			return Err(401, "bad token");
 +		if (req.method != "GET" && req.method != "POST")
 +			return Err(405, "method not allowed");
@@ -804,6 +1043,8 @@ index 0000000..b3dacc2
 +			return HandleSky(req, route.substr(3));
 +		if (route.rfind("gfx", 0) == 0)
 +			return HandleGfx(req, route.substr(3));
++		if (route.rfind("coop", 0) == 0)
++			return HandleCoop(req, route.substr(4));
 +		if (route.rfind("update", 0) == 0)
 +			return HandleUpdate(req, route.substr(6));
 +		return Err(404, "unknown route");
@@ -811,10 +1052,10 @@ index 0000000..b3dacc2
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlApi.h b/src/gui/sdlgui/ControlApi.h
 new file mode 100644
-index 0000000..61971b8
+index 0000000..4de572c
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,82 @@
 +#pragma once
 +// JSON API + static file server behind the NEBULATOR UI.
 +
@@ -889,12 +1130,1235 @@ index 0000000..61971b8
 +	HttpResponse HandleSky(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleGfx(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleUpdate(const HttpRequest& req, const std::string& sub);
++	HttpResponse HandleCoop(const HttpRequest& req, const std::string& sub);
++	std::string CurrentTitle();
 +	std::string AppVersion(); // from version.txt next to the exe ("dev" when missing)
 +	void RequestQuit(bool appQuit);
 +	void SkyRestore(); // re-apply the saved portal slots
 +	void InputSetUserProfile(); // called when the UI changed bindings of player 1
 +	bool InputHasUserProfile();
 +} // namespace ControlApi
+diff --git a/src/gui/sdlgui/ControlCoop.cpp b/src/gui/sdlgui/ControlCoop.cpp
+new file mode 100644
+index 0000000..ca3de27
+--- /dev/null
++++ b/src/gui/sdlgui/ControlCoop.cpp
+@@ -0,0 +1,1193 @@
++// LAN co-op. One person hosts (the game runs on their PC), friends on the same Wi-Fi press Join in their own
++// NEBULATOR and type the host's code. The host streams picture and sound to each guest; the guests' buttons arrive as
++// extra controllers (players 2-4) on the host, so the game just sees more people on the same console.
++//
++// Wire protocol (TCP 17800, little endian): [u8 type][u32 length][payload]
++//   1 HELLO   guest->host  "NEBCOOP1" u8 codeLen code u8 nameLen name
++//   2 WELCOME host->guest  u8 ok, u8 slot (1..3), u8 msgLen msg
++//   3 INPUT   guest->host  u32 buttons, i8 lx ly rx ry
++//   4 FRAME   host->guest  u16 w, u16 h, JPEG bytes
++//   5 AUDIO   host->guest  s16 stereo 48 kHz
++//   6 BYE     either
++//   7 PING / 8 PONG  either way, u64 echo
++// UDP 17801: a guest broadcasts "NEBCOOP?"; the host answers "NEBCOOP!" u16 tcpPort u8 nameLen name u8 titleLen title u8 freeSlots
++
++#include "ControlApi.h"
++#include "ControlCoop.h"
++#include "CoopRemote.h"
++#include "JpegEnc.h"
++
++#include "input/InputManager.h"
++#include "input/emulated/ProController.h"
++
++#include <boost/asio.hpp>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstring>
++#include <deque>
++#include <mutex>
++#include <random>
++#include <thread>
++
++#ifdef _WIN32
++#include <winsock2.h>
++#else
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <netinet/tcp.h>
++#endif
++
++namespace asio = boost::asio;
++using asio::ip::tcp;
++using asio::ip::udp;
++
++namespace
++{
++	constexpr uint16_t kTcpPort = 17800;
++	constexpr uint16_t kUdpPort = 17801;
++	constexpr int kMaxGuests = 3;
++
++	enum Msg : uint8_t { kHello = 1, kWelcome = 2, kInput = 3, kFrame = 4, kAudio = 5, kBye = 6, kPing = 7, kPong = 8 };
++
++	int64_t NowMs()
++	{
++		return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++	}
++	uint64_t NowUs()
++	{
++		return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++	}
++
++	void SetRecvTimeout(tcp::socket& s, int ms)
++	{
++#ifdef _WIN32
++		DWORD v = (DWORD)ms;
++		setsockopt(s.native_handle(), SOL_SOCKET, SO_RCVTIMEO, (const char*)&v, sizeof(v));
++#else
++		timeval tv{ms / 1000, (ms % 1000) * 1000};
++		setsockopt(s.native_handle(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++#endif
++	}
++
++	void Tune(tcp::socket& s)
++	{
++		boost::system::error_code ec;
++		s.set_option(tcp::no_delay(true), ec);
++	}
++
++	void PutU32(std::string& o, uint32_t v) { for (int i = 0; i < 4; i++) o.push_back((char)(v >> (8 * i))); }
++	void PutU16(std::string& o, uint32_t v) { o.push_back((char)v); o.push_back((char)(v >> 8)); }
++	uint32_t GetU32(const char* p) { uint32_t v = 0; for (int i = 0; i < 4; i++) v |= (uint32_t)(uint8_t)p[i] << (8 * i); return v; }
++	uint64_t GetU64(const char* p) { uint64_t v = 0; for (int i = 0; i < 8; i++) v |= (uint64_t)(uint8_t)p[i] << (8 * i); return v; }
++	void PutU64(std::string& o, uint64_t v) { for (int i = 0; i < 8; i++) o.push_back((char)(v >> (8 * i))); }
++
++	bool SendMsg(tcp::socket& s, uint8_t type, const void* data, uint32_t len)
++	{
++		uint8_t hdr[5] = {type, (uint8_t)len, (uint8_t)(len >> 8), (uint8_t)(len >> 16), (uint8_t)(len >> 24)};
++		std::array<asio::const_buffer, 2> bufs = {asio::buffer(hdr, 5), asio::buffer(data, len)};
++		boost::system::error_code ec;
++		asio::write(s, bufs, ec);
++		return !ec;
++	}
++	bool SendMsg(tcp::socket& s, uint8_t type, const std::string& p) { return SendMsg(s, type, p.data(), (uint32_t)p.size()); }
++
++	bool RecvMsg(tcp::socket& s, uint8_t& type, std::string& payload, uint32_t maxLen)
++	{
++		uint8_t hdr[5];
++		boost::system::error_code ec;
++		asio::read(s, asio::buffer(hdr, 5), ec);
++		if (ec)
++			return false;
++		type = hdr[0];
++		const uint32_t len = GetU32((const char*)hdr + 1);
++		if (len > maxLen)
++			return false;
++		payload.resize(len);
++		if (len)
++			asio::read(s, asio::buffer(payload.data(), len), ec);
++		return !ec;
++	}
++
++	std::string LocalIp()
++	{
++		try
++		{
++			asio::io_context io;
++			udp::socket s(io);
++			s.connect(udp::endpoint(asio::ip::make_address("192.0.2.1"), 9)); // no packet is sent
++			return s.local_endpoint().address().to_string();
++		}
++		catch (...)
++		{
++			return "";
++		}
++	}
++
++	std::string MakeCode()
++	{
++		static const char alpha[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
++		std::random_device rd;
++		std::string c;
++		for (int i = 0; i < 5; i++)
++			c.push_back(alpha[rd() % (sizeof(alpha) - 1)]);
++		return c;
++	}
++
++	std::string NormCode(std::string c)
++	{
++		std::string o;
++		for (char ch : c)
++			if (ch != ' ' && ch != '-')
++				o.push_back((char)std::toupper((unsigned char)ch));
++		return o;
++	}
++
++	bool SameCode(const std::string& a, const std::string& b)
++	{
++		if (a.size() != b.size())
++			return false;
++		unsigned d = 0;
++		for (size_t i = 0; i < a.size(); i++)
++			d |= (unsigned)(a[i] ^ b[i]);
++		return d == 0;
++	}
++
++	// ====================================================================== host
++	struct GuestConn
++	{
++		tcp::socket sock;
++		int slot = 0;
++		std::string name;
++		std::shared_ptr<CoopRemote> pad;
++		std::atomic_bool alive{true};
++		std::atomic<int> pingMs{-1};
++		std::mutex wm; // serialises writes
++		std::mutex m;
++		std::condition_variable cv;
++		std::string frame;
++		bool frameNew = false;
++		std::deque<std::string> audio;
++		explicit GuestConn(tcp::socket s) : sock(std::move(s)) {}
++		void Close()
++		{
++			alive = false;
++			boost::system::error_code ec;
++			sock.shutdown(tcp::socket::shutdown_both, ec);
++			sock.close(ec);
++			cv.notify_all();
++		}
++	};
++
++	struct HostState
++	{
++		std::mutex m;
++		std::atomic_bool running{false};
++		std::string code, name;
++		std::atomic<int> quality{60}, fps{30}, maxWidth{640};
++		std::vector<std::shared_ptr<GuestConn>> guests;
++		std::unique_ptr<asio::io_context> io;
++		std::unique_ptr<tcp::acceptor> acc;
++		std::unique_ptr<udp::socket> disc;
++		std::thread ioThread, encThread, testThread;
++		// encoder hand-off (latest wins)
++		std::mutex em;
++		std::condition_variable ecv;
++		std::vector<uint8_t> pend;
++		int pw = 0, ph = 0;
++		bool pendNew = false;
++		int64_t lastEnc = 0;
++		std::atomic<int64_t> lastWant{0};
++		std::atomic<int> wrongTries{0};
++		std::atomic_bool test{false};
++	} H;
++
++	std::atomic<int> g_guestCount{0};
++
++	void DetachPad(GuestConn& g)
++	{
++		if (!g.pad)
++			return;
++		auto& im = InputManager::instance();
++		if (auto emu = im.get_controller((size_t)g.slot))
++			emu->remove_controller(g.pad);
++		// put back whatever the host had saved for that player
++		if (!im.load((size_t)g.slot))
++			im.delete_controller((size_t)g.slot, false);
++		g.pad.reset();
++	}
++
++	void AttachPad(GuestConn& g)
++	{
++		auto& im = InputManager::instance();
++		auto emu = im.set_controller((size_t)g.slot, EmulatedController::Type::Pro);
++		if (!emu)
++			return;
++		emu->clear_controllers();
++		emu->clear_mappings();
++		g.pad = std::make_shared<CoopRemote>("coop-" + std::to_string(g.slot), "Guest " + g.name);
++		emu->add_controller(g.pad);
++		CoopRemote::ApplyMapping(emu, g.pad);
++	}
++
++	void DropGuest(const std::shared_ptr<GuestConn>& g)
++	{
++		g->Close();
++		std::scoped_lock l(H.m);
++		auto it = std::find(H.guests.begin(), H.guests.end(), g);
++		if (it != H.guests.end())
++		{
++			DetachPad(**it);
++			H.guests.erase(it);
++			g_guestCount = (int)H.guests.size();
++		}
++	}
++
++	void GuestWriter(std::shared_ptr<GuestConn> g)
++	{
++		int64_t nextPing = NowMs();
++		while (g->alive && H.running)
++		{
++			std::string frame;
++			std::deque<std::string> audio;
++			{
++				std::unique_lock l(g->m);
++				g->cv.wait_for(l, std::chrono::milliseconds(250), [&] { return g->frameNew || !g->audio.empty() || !g->alive; });
++				if (!g->alive)
++					break;
++				if (g->frameNew)
++				{
++					frame.swap(g->frame);
++					g->frameNew = false;
++				}
++				audio.swap(g->audio);
++			}
++			std::scoped_lock wl(g->wm);
++			for (auto& a : audio)
++				if (!SendMsg(g->sock, kAudio, a))
++				{
++					g->alive = false;
++					break;
++				}
++			if (!frame.empty() && g->alive && !SendMsg(g->sock, kFrame, frame))
++				g->alive = false;
++			if (NowMs() >= nextPing)
++			{
++				std::string p;
++				PutU64(p, NowUs());
++				SendMsg(g->sock, kPing, p);
++				nextPing = NowMs() + 1000;
++			}
++		}
++		g->alive = false;
++	}
++
++	void GuestReader(std::shared_ptr<GuestConn> g)
++	{
++		SetRecvTimeout(g->sock, 8000); // we ping every second, so silence means the guest is gone
++		std::thread(GuestWriter, g).detach();
++		uint8_t type;
++		std::string p;
++		while (g->alive && H.running && RecvMsg(g->sock, type, p, 1024))
++		{
++			if (type == kInput && p.size() >= 8 && g->pad)
++			{
++				g->pad->Set(GetU32(p.data()), (int8_t)p[4], (int8_t)p[5], (int8_t)p[6], (int8_t)p[7]);
++			}
++			else if (type == kPing && p.size() == 8)
++			{
++				std::scoped_lock wl(g->wm);
++				SendMsg(g->sock, kPong, p);
++			}
++			else if (type == kPong && p.size() == 8)
++			{
++				const uint64_t t = GetU64(p.data());
++				g->pingMs = (int)((NowUs() - t) / 1000);
++			}
++			else if (type == kBye)
++				break;
++		}
++		DropGuest(g);
++	}
++
++	void Handshake(tcp::socket sock)
++	{
++		Tune(sock);
++		SetRecvTimeout(sock, 4000);
++		uint8_t type;
++		std::string p;
++		auto reject = [&](const std::string& why) {
++			std::string w;
++			w.push_back(0);
++			w.push_back(0);
++			w.push_back((char)why.size());
++			w += why;
++			SendMsg(sock, kWelcome, w);
++			boost::system::error_code ec;
++			sock.close(ec);
++		};
++		if (!RecvMsg(sock, type, p, 256) || type != kHello || p.size() < 10 || p.compare(0, 8, "NEBCOOP1") != 0)
++		{
++			boost::system::error_code ec;
++			sock.close(ec);
++			return;
++		}
++		size_t i = 8;
++		const size_t cl = (uint8_t)p[i++];
++		if (i + cl >= p.size())
++			return reject("bad hello");
++		const std::string code = NormCode(p.substr(i, cl));
++		i += cl;
++		const size_t nl = (uint8_t)p[i++];
++		std::string name = i + nl <= p.size() ? p.substr(i, nl) : "Guest";
++		if (name.empty())
++			name = "Guest";
++		if (name.size() > 24)
++			name.resize(24);
++
++		if (H.wrongTries >= 8)
++			return reject("too many wrong codes, ask the host to restart hosting");
++		std::string hostCode;
++		{
++			std::scoped_lock l(H.m);
++			hostCode = H.code;
++		}
++		if (!H.running || !SameCode(code, hostCode))
++		{
++			H.wrongTries++;
++			return reject("wrong code");
++		}
++		auto g = std::make_shared<GuestConn>(std::move(sock));
++		g->name = name;
++		{
++			std::scoped_lock l(H.m);
++			bool used[kMaxGuests + 1] = {};
++			for (auto& o : H.guests)
++				used[o->slot] = true;
++			for (int s = 1; s <= kMaxGuests; s++)
++				if (!used[s])
++				{
++					g->slot = s;
++					break;
++				}
++			if (g->slot == 0)
++			{
++				std::string w;
++				w.push_back(0); w.push_back(0);
++				const std::string why = "the game is full";
++				w.push_back((char)why.size());
++				w += why;
++				SendMsg(g->sock, kWelcome, w);
++				return;
++			}
++			AttachPad(*g);
++			H.guests.push_back(g);
++			g_guestCount = (int)H.guests.size();
++		}
++		H.wrongTries = 0;
++		std::string w;
++		w.push_back(1);
++		w.push_back((char)g->slot);
++		w.push_back(0);
++		{
++			std::scoped_lock wl(g->wm);
++			if (!SendMsg(g->sock, kWelcome, w))
++			{
++				DropGuest(g);
++				return;
++			}
++		}
++		GuestReader(g);
++	}
++
++	struct AcceptCtx
++	{
++		tcp::socket sock;
++		explicit AcceptCtx(asio::io_context& io) : sock(io) {}
++	};
++
++	// listening is async on one io thread, so Stop can always wake it (closing a socket another thread is blocked on
++	// in accept()/recv() does not wake it on every OS)
++	void DoAccept()
++	{
++		auto ctx = std::make_shared<AcceptCtx>(*H.io);
++		H.acc->async_accept(ctx->sock, [ctx](const boost::system::error_code& ec) {
++			if (ec || !H.running)
++				return;
++			std::thread([sk = std::move(ctx->sock)]() mutable { Handshake(std::move(sk)); }).detach();
++			DoAccept();
++		});
++	}
++
++	struct DiscBuf
++	{
++		char data[64];
++		udp::endpoint from;
++	};
++	std::shared_ptr<DiscBuf> g_discBuf;
++
++	void DoDiscovery()
++	{
++		g_discBuf = std::make_shared<DiscBuf>();
++		auto db = g_discBuf;
++		H.disc->async_receive_from(asio::buffer(db->data), db->from, [db](const boost::system::error_code& ec, size_t n) {
++			if (ec || !H.running)
++				return;
++			if (n >= 8 && std::memcmp(db->data, "NEBCOOP?", 8) == 0)
++			{
++				std::string r = "NEBCOOP!";
++				PutU16(r, kTcpPort);
++				std::string name, title;
++				int freeSlots;
++				{
++					std::scoped_lock l(H.m);
++					name = H.name;
++					freeSlots = kMaxGuests - (int)H.guests.size();
++				}
++				title = ControlApi::CurrentTitle();
++				if (name.size() > 40) name.resize(40);
++				if (title.size() > 60) title.resize(60);
++				r.push_back((char)name.size()); r += name;
++				r.push_back((char)title.size()); r += title;
++				r.push_back((char)freeSlots);
++				boost::system::error_code e2;
++				H.disc->send_to(asio::buffer(r), db->from, 0, e2);
++			}
++			DoDiscovery();
++		});
++	}
++
++	void IoLoop()
++	{
++		DoAccept();
++		DoDiscovery();
++		H.io->run();
++	}
++
++	void EncodeLoop()
++	{
++		std::vector<uint8_t> local;
++		while (H.running)
++		{
++			int w, h;
++			{
++				std::unique_lock l(H.em);
++				H.ecv.wait_for(l, std::chrono::milliseconds(200), [] { return H.pendNew || !H.running; });
++				if (!H.running)
++					break;
++				if (!H.pendNew)
++					continue;
++				local.swap(H.pend);
++				w = H.pw;
++				h = H.ph;
++				H.pendNew = false;
++			}
++			std::string jpg = JpegEnc::Encode(local.data(), w, h, H.quality);
++			if (jpg.empty())
++				continue;
++			std::string payload;
++			PutU16(payload, (uint32_t)w);
++			PutU16(payload, (uint32_t)h);
++			payload += jpg;
++			std::scoped_lock l(H.m);
++			for (auto& g : H.guests)
++			{
++				std::scoped_lock gl(g->m);
++				g->frame = payload;
++				g->frameNew = true;
++				g->cv.notify_one();
++			}
++		}
++	}
++
++	// Linux test source: a moving pattern so the pipeline can be checked without a game
++	void TestLoop()
++	{
++		std::vector<uint8_t> px;
++		int t = 0;
++		while (H.running && H.test)
++		{
++			if (Coop::WantFrame())
++			{
++				const int w = std::min(H.maxWidth.load(), 1280) & ~1, h = (w * 9 / 16) & ~1;
++				px.resize((size_t)w * h * 3);
++				for (int y = 0; y < h; y++)
++					for (int x = 0; x < w; x++)
++					{
++						uint8_t* p = &px[((size_t)y * w + x) * 3];
++						const bool bar = (x > (t * 6) % w && x < (t * 6) % w + 24);
++						p[0] = bar ? 255 : (uint8_t)(x * 255 / w);
++						p[1] = bar ? 255 : (uint8_t)(y * 255 / h);
++						p[2] = bar ? 255 : (uint8_t)((t * 3) & 255);
++					}
++				Coop::SubmitFrame(px.data(), w, h);
++				t++;
++			}
++			std::this_thread::sleep_for(std::chrono::milliseconds(1000 / std::max(1, H.fps.load())));
++		}
++	}
++
++	void StopHost()
++	{
++		if (!H.running.exchange(false))
++			return;
++		std::vector<std::shared_ptr<GuestConn>> gs;
++		{
++			std::scoped_lock l(H.m);
++			gs = H.guests;
++		}
++		for (auto& g : gs)
++		{
++			{
++				std::scoped_lock wl(g->wm);
++				SendMsg(g->sock, kBye, nullptr, 0);
++			}
++			DropGuest(g);
++		}
++		boost::system::error_code ec;
++		if (H.acc) H.acc->close(ec);
++		if (H.disc) H.disc->close(ec);
++		if (H.io) H.io->stop();
++		H.ecv.notify_all();
++		if (H.ioThread.joinable()) H.ioThread.join();
++		if (H.encThread.joinable()) H.encThread.join();
++		if (H.testThread.joinable()) H.testThread.join();
++		H.acc.reset();
++		H.disc.reset();
++		H.io.reset();
++		g_guestCount = 0;
++	}
++
++	std::string StartHost(const std::string& name, std::string& err)
++	{
++		if (H.running)
++			return H.code;
++		try
++		{
++			H.io = std::make_unique<asio::io_context>();
++			H.acc = std::make_unique<tcp::acceptor>(*H.io);
++			tcp::endpoint ep(asio::ip::make_address("0.0.0.0"), kTcpPort);
++			H.acc->open(ep.protocol());
++			H.acc->set_option(tcp::acceptor::reuse_address(true));
++			H.acc->bind(ep);
++			H.acc->listen();
++			H.disc = std::make_unique<udp::socket>(*H.io);
++			udp::endpoint uep(asio::ip::make_address("0.0.0.0"), kUdpPort);
++			H.disc->open(uep.protocol());
++			H.disc->set_option(udp::socket::reuse_address(true));
++			H.disc->bind(uep);
++		}
++		catch (const std::exception& ex)
++		{
++			err = std::string("couldn't open the co-op port (") + ex.what() + "). Is another NEBULATOR already hosting?";
++			H.acc.reset();
++			H.disc.reset();
++			H.io.reset();
++			return "";
++		}
++		{
++			std::scoped_lock l(H.m);
++			H.code = MakeCode();
++			H.name = name.empty() ? "NEBULATOR host" : name;
++			H.guests.clear();
++		}
++		H.wrongTries = 0;
++		H.running = true;
++		H.test = std::getenv("NEBULATOR_COOP_TEST") != nullptr;
++		H.ioThread = std::thread(IoLoop);
++		H.encThread = std::thread(EncodeLoop);
++		if (H.test)
++			H.testThread = std::thread(TestLoop);
++		return H.code;
++	}
++
++	// ====================================================================== guest
++	struct ClientState
++	{
++		std::mutex m;
++		std::condition_variable cv;
++		std::atomic_bool active{false};
++		std::string state = "idle"; // idle, connecting, connected, error
++		std::string message, host;
++		int slot = 0;
++		std::unique_ptr<asio::io_context> io;
++		std::shared_ptr<tcp::socket> sock;
++		std::mutex wm;
++		std::thread reader, pinger;
++		std::string frame; // newest JPEG
++		uint64_t frameSeq = 0;
++		int fw = 0, fh = 0;
++		std::deque<std::string> audio;
++		uint64_t audioSeq = 0;
++		std::atomic<int> pingMs{-1};
++		std::atomic<int> fps{0};
++		int fpsCount = 0;
++		int64_t fpsT = 0;
++		uint32_t lastButtons = 0xFFFFFFFF;
++		uint32_t lastAxes = 0;
++	} C;
++
++	void ClientSet(const std::string& state, const std::string& msg)
++	{
++		std::scoped_lock l(C.m);
++		C.state = state;
++		C.message = msg;
++		C.cv.notify_all();
++	}
++
++	void ClientReader(std::shared_ptr<tcp::socket> sock)
++	{
++		uint8_t type;
++		std::string p;
++		SetRecvTimeout(*sock, 8000);
++		while (C.active && RecvMsg(*sock, type, p, 8u << 20))
++		{
++			if (type == kFrame && p.size() > 4)
++			{
++				std::scoped_lock l(C.m);
++				C.fw = (uint8_t)p[0] | ((uint8_t)p[1] << 8);
++				C.fh = (uint8_t)p[2] | ((uint8_t)p[3] << 8);
++				C.frame.assign(p.data() + 4, p.size() - 4);
++				C.frameSeq++;
++				const int64_t now = NowMs();
++				C.fpsCount++;
++				if (now - C.fpsT >= 1000)
++				{
++					C.fps = C.fpsCount;
++					C.fpsCount = 0;
++					C.fpsT = now;
++				}
++				C.cv.notify_all();
++			}
++			else if (type == kAudio)
++			{
++				std::scoped_lock l(C.m);
++				C.audio.push_back(std::move(p));
++				while (C.audio.size() > 8) // never build a backlog: old sound is worse than a gap
++					C.audio.pop_front();
++				C.audioSeq++;
++				C.cv.notify_all();
++			}
++			else if (type == kPing && p.size() == 8)
++			{
++				std::scoped_lock wl(C.wm);
++				SendMsg(*sock, kPong, p);
++			}
++			else if (type == kPong && p.size() == 8)
++				C.pingMs = (int)((NowUs() - GetU64(p.data())) / 1000);
++			else if (type == kBye)
++			{
++				ClientSet("error", "The host ended the session");
++				break;
++			}
++		}
++		if (C.active)
++		{
++			std::scoped_lock l(C.m);
++			if (C.state == "connected")
++			{
++				C.state = "error";
++				C.message = "Lost the connection to the host";
++			}
++		}
++		C.active = false;
++		boost::system::error_code ec;
++		sock->close(ec);
++		C.cv.notify_all();
++	}
++
++	void LeaveClient(bool say = true)
++	{
++		const bool was = C.active.exchange(false);
++		std::shared_ptr<tcp::socket> s;
++		{
++			std::scoped_lock l(C.m);
++			s = C.sock;
++		}
++		if (s && was && say)
++		{
++			std::scoped_lock wl(C.wm);
++			SendMsg(*s, kBye, nullptr, 0);
++		}
++		if (s)
++		{
++			boost::system::error_code ec;
++			s->shutdown(tcp::socket::shutdown_both, ec);
++			s->close(ec);
++		}
++		C.cv.notify_all();
++		if (C.reader.joinable()) C.reader.join();
++		if (C.pinger.joinable()) C.pinger.join();
++		std::scoped_lock l(C.m);
++		C.sock.reset();
++		C.io.reset();
++		C.frame.clear();
++		C.audio.clear();
++		C.state = "idle";
++		C.message.clear();
++		C.slot = 0;
++		C.pingMs = -1;
++		C.fps = 0;
++		C.lastButtons = 0xFFFFFFFF;
++	}
++
++	bool JoinClient(const std::string& host, const std::string& code, const std::string& name, std::string& err)
++	{
++		LeaveClient(false);
++		try
++		{
++			C.io = std::make_unique<asio::io_context>();
++			auto sock = std::make_shared<tcp::socket>(*C.io);
++			boost::system::error_code ec;
++			tcp::endpoint ep(asio::ip::make_address(host, ec), kTcpPort);
++			if (ec)
++			{
++				err = "that isn't a valid address";
++				return false;
++			}
++			ClientSet("connecting", "Connecting...");
++			// connect with a timeout: non-blocking connect + wait
++			sock->open(ep.protocol());
++			sock->non_blocking(true);
++			sock->connect(ep, ec);
++			if (ec && ec != asio::error::in_progress && ec != asio::error::would_block)
++			{
++				err = "couldn't reach the host";
++				ClientSet("idle", "");
++				return false;
++			}
++			sock->non_blocking(false);
++			if (ec)
++			{
++				// in progress: wait for writability up to 4s
++				fd_set wf;
++				FD_ZERO(&wf);
++				FD_SET((unsigned)sock->native_handle(), &wf);
++				timeval tv{4, 0};
++				if (select((int)sock->native_handle() + 1, nullptr, &wf, nullptr, &tv) <= 0)
++				{
++					err = "couldn't reach the host (is it on the same Wi-Fi, and is hosting turned on?)";
++					ClientSet("idle", "");
++					return false;
++				}
++				boost::system::error_code e2;
++				sock->remote_endpoint(e2);
++				if (e2)
++				{
++					err = "couldn't reach the host";
++					ClientSet("idle", "");
++					return false;
++				}
++			}
++			Tune(*sock);
++			SetRecvTimeout(*sock, 5000);
++			std::string hello = "NEBCOOP1";
++			const std::string c = NormCode(code);
++			hello.push_back((char)c.size());
++			hello += c;
++			std::string nm = name.empty() ? "Guest" : name.substr(0, 24);
++			hello.push_back((char)nm.size());
++			hello += nm;
++			uint8_t type;
++			std::string p;
++			if (!SendMsg(*sock, kHello, hello) || !RecvMsg(*sock, type, p, 256) || type != kWelcome || p.size() < 3)
++			{
++				err = "the host didn't answer";
++				ClientSet("idle", "");
++				return false;
++			}
++			if (!p[0])
++			{
++				err = p.substr(3, (uint8_t)p[2]);
++				ClientSet("idle", "");
++				return false;
++			}
++			{
++				std::scoped_lock l(C.m);
++				C.sock = sock;
++				C.slot = (uint8_t)p[1];
++				C.host = host;
++				C.state = "connected";
++				C.message.clear();
++				C.frame.clear();
++				C.frameSeq = 0;
++				C.fpsT = NowMs();
++				C.fpsCount = 0;
++			}
++			C.active = true;
++			C.reader = std::thread(ClientReader, sock);
++			C.pinger = std::thread([sock] {
++				int64_t next = NowMs();
++				while (C.active)
++				{
++					if (NowMs() >= next)
++					{
++						std::string q;
++						PutU64(q, NowUs());
++						std::scoped_lock wl(C.wm);
++						SendMsg(*sock, kPing, q);
++						next = NowMs() + 1000;
++					}
++					std::this_thread::sleep_for(std::chrono::milliseconds(50));
++				}
++			});
++			return true;
++		}
++		catch (const std::exception& ex)
++		{
++			err = std::string("couldn't connect: ") + ex.what();
++			ClientSet("idle", "");
++			return false;
++		}
++	}
++
++	struct Found
++	{
++		std::string ip, name, title;
++		int freeSlots;
++	};
++
++	std::vector<Found> Discover()
++	{
++		std::vector<Found> out;
++		try
++		{
++			asio::io_context io;
++			udp::socket s(io);
++			s.open(udp::v4());
++			s.set_option(asio::socket_base::broadcast(true));
++			s.bind(udp::endpoint(udp::v4(), 0));
++			const char q[] = "NEBCOOP?";
++			boost::system::error_code ec;
++			s.send_to(asio::buffer(q, 8), udp::endpoint(asio::ip::make_address_v4("255.255.255.255"), kUdpPort), 0, ec);
++			if (std::getenv("NEBULATOR_COOP_TEST")) // lets two cores on one PC find each other in tests
++				s.send_to(asio::buffer(q, 8), udp::endpoint(asio::ip::make_address_v4("127.0.0.1"), kUdpPort), 0, ec);
++			s.non_blocking(true);
++			const int64_t end = NowMs() + 700;
++			char buf[256];
++			while (NowMs() < end)
++			{
++				udp::endpoint from;
++				const size_t n = s.receive_from(asio::buffer(buf), from, 0, ec);
++				if (ec)
++				{
++					std::this_thread::sleep_for(std::chrono::milliseconds(15));
++					continue;
++				}
++				if (n < 8 + 2 + 3 || std::memcmp(buf, "NEBCOOP!", 8) != 0)
++					continue;
++				size_t i = 10;
++				Found f;
++				f.ip = from.address().to_string();
++				const size_t nl = (uint8_t)buf[i++];
++				if (i + nl + 2 > n) continue;
++				f.name.assign(buf + i, nl);
++				i += nl;
++				const size_t tl = (uint8_t)buf[i++];
++				if (i + tl + 1 > n) continue;
++				f.title.assign(buf + i, tl);
++				i += tl;
++				f.freeSlots = (uint8_t)buf[i];
++				bool dup = false;
++				for (auto& o : out)
++					dup |= o.ip == f.ip;
++				if (!dup)
++					out.push_back(f);
++			}
++		}
++		catch (...)
++		{
++		}
++		return out;
++	}
++} // namespace
++
++// ============================================================================ public hooks
++namespace Coop
++{
++	bool WantFrame()
++	{
++		if (!H.running || g_guestCount.load() == 0)
++			return false;
++		// rate limit by the configured fps
++		const int64_t now = NowMs();
++		const int64_t gap = 1000 / std::max(1, H.fps.load());
++		return now - H.lastWant.load() >= gap;
++	}
++
++	bool HasGuests() { return H.running && g_guestCount.load() > 0; }
++
++	int MaxWidth() { return H.maxWidth; }
++
++	void SubmitFrame(const uint8_t* rgb, int w, int h)
++	{
++		if (!H.running || w <= 0 || h <= 0)
++			return;
++		H.lastWant = NowMs();
++		std::scoped_lock l(H.em);
++		H.pend.assign(rgb, rgb + (size_t)w * h * 3);
++		H.pw = w;
++		H.ph = h;
++		H.pendNew = true;
++		H.ecv.notify_one();
++	}
++
++	void SubmitAudio(const int16_t* stereo, int frames)
++	{
++		if (!H.running || g_guestCount.load() == 0 || frames <= 0)
++			return;
++		const std::string chunk((const char*)stereo, (size_t)frames * 4);
++		std::scoped_lock l(H.m);
++		for (auto& g : H.guests)
++		{
++			std::scoped_lock gl(g->m);
++			g->audio.push_back(chunk);
++			while (g->audio.size() > 6) // cap the backlog (~60 ms at 10 ms chunks)
++				g->audio.pop_front();
++			g->cv.notify_one();
++		}
++	}
++} // namespace Coop
++
++// ============================================================================ API
++namespace ControlApi
++{
++	namespace
++	{
++		HttpResponse Status()
++		{
++			Json j;
++			j.w.StartObject();
++			const bool hosting = H.running;
++			const bool joined = C.active || C.state == "connecting" || C.state == "error";
++			j.KS("role", hosting ? "host" : (joined ? "guest" : "none"));
++			j.KS("ip", LocalIp());
++			j.K("host");
++			j.w.StartObject();
++			j.KB("running", hosting);
++			if (hosting)
++			{
++				std::scoped_lock l(H.m);
++				j.KS("code", H.code);
++				j.KS("name", H.name);
++				j.KI("quality", H.quality);
++				j.KI("fps", H.fps);
++				j.KI("maxWidth", H.maxWidth);
++				j.KB("test", H.test);
++				j.K("guests");
++				j.w.StartArray();
++				for (auto& g : H.guests)
++				{
++					j.w.StartObject();
++					j.KI("slot", g->slot);
++					j.KS("name", g->name);
++					j.KI("pingMs", g->pingMs);
++					j.w.EndObject();
++				}
++				j.w.EndArray();
++			}
++			j.w.EndObject();
++			j.K("guest");
++			j.w.StartObject();
++			{
++				std::scoped_lock l(C.m);
++				j.KS("state", C.state);
++				j.KS("message", C.message);
++				j.KS("host", C.host);
++				j.KI("slot", C.slot);
++				j.KI("pingMs", C.pingMs);
++				j.KI("fps", C.fps);
++				j.KI("w", C.fw);
++				j.KI("h", C.fh);
++				j.KI("frames", (int64_t)C.frameSeq);
++			}
++			j.w.EndObject();
++			j.w.EndObject();
++			return Ok(j);
++		}
++
++		HttpResponse StreamFrames()
++		{
++			HttpResponse r;
++			r.contentType = "multipart/x-mixed-replace; boundary=nebframe";
++			r.stream = [](const std::function<bool(const std::string&)>& write) {
++				uint64_t seen = 0;
++				while (C.active)
++				{
++					std::string f;
++					{
++						std::unique_lock l(C.m);
++						C.cv.wait_for(l, std::chrono::milliseconds(500), [&] { return C.frameSeq != seen || !C.active; });
++						if (!C.active)
++							break;
++						if (C.frameSeq == seen)
++							continue;
++						seen = C.frameSeq;
++						f = C.frame;
++					}
++					std::string part = "--nebframe\r\nContent-Type: image/jpeg\r\nContent-Length: " + std::to_string(f.size()) + "\r\n\r\n";
++					part += f;
++					part += "\r\n";
++					if (!write(part))
++						break;
++				}
++			};
++			return r;
++		}
++
++		HttpResponse StreamAudio()
++		{
++			HttpResponse r;
++			r.contentType = "application/octet-stream";
++			r.stream = [](const std::function<bool(const std::string&)>& write) {
++				uint64_t seen;
++				{
++					std::scoped_lock l(C.m);
++					seen = C.audioSeq;
++				}
++				while (C.active)
++				{
++					std::deque<std::string> take;
++					{
++						std::unique_lock l(C.m);
++						C.cv.wait_for(l, std::chrono::milliseconds(500), [&] { return C.audioSeq != seen || !C.active; });
++						if (!C.active)
++							break;
++						if (C.audioSeq == seen)
++							continue;
++						seen = C.audioSeq;
++						take.swap(C.audio);
++					}
++					std::string out;
++					for (auto& t : take)
++						out += t;
++					if (!write(out))
++						break;
++				}
++			};
++			return r;
++		}
++	} // namespace
++
++	HttpResponse HandleCoop(const HttpRequest& req, const std::string& sub)
++	{
++		const bool post = req.method == "POST";
++		if (sub.empty() || sub == "/status")
++			return Status();
++		if (sub == "/stream")
++			return C.active ? StreamFrames() : Err(409, "not in a session");
++		if (sub == "/audio")
++			return C.active ? StreamAudio() : Err(409, "not in a session");
++		if (sub == "/discover")
++		{
++			auto list = Discover();
++			Json j;
++			j.w.StartObject();
++			j.K("hosts");
++			j.w.StartArray();
++			for (auto& f : list)
++			{
++				j.w.StartObject();
++				j.KS("ip", f.ip);
++				j.KS("name", f.name);
++				j.KS("title", f.title);
++				j.KI("freeSlots", f.freeSlots);
++				j.w.EndObject();
++			}
++			j.w.EndArray();
++			j.w.EndObject();
++			return Ok(j);
++		}
++		if (!post)
++			return Err(405, "method not allowed");
++		rapidjson::Document d;
++		if (!ParseBody(req, d))
++			return Err(400, "invalid json");
++		if (sub == "/host/start")
++		{
++			if (C.active)
++				return Err(409, "leave the session you joined first");
++			std::string err;
++			if (StartHost(GetStr(d, "name"), err).empty())
++				return Err(500, err);
++			return Status();
++		}
++		if (sub == "/host/stop")
++		{
++			StopHost();
++			return Status();
++		}
++		if (sub == "/host/settings")
++		{
++			if (Has(d, "quality"))
++				H.quality = (int)std::clamp<int64_t>(GetInt(d, "quality", 60), 20, 95);
++			if (Has(d, "fps"))
++				H.fps = (int)std::clamp<int64_t>(GetInt(d, "fps", 30), 10, 60);
++			if (Has(d, "maxWidth"))
++				H.maxWidth = (int)std::clamp<int64_t>(GetInt(d, "maxWidth", 640), 320, 1280);
++			return Status();
++		}
++		if (sub == "/host/kick")
++		{
++			const int slot = (int)GetInt(d, "slot", 0);
++			std::shared_ptr<GuestConn> hit;
++			{
++				std::scoped_lock l(H.m);
++				for (auto& g : H.guests)
++					if (g->slot == slot)
++						hit = g;
++			}
++			if (hit)
++			{
++				{
++					std::scoped_lock wl(hit->wm);
++					SendMsg(hit->sock, kBye, nullptr, 0);
++				}
++				DropGuest(hit);
++			}
++			return Status();
++		}
++		if (sub == "/join")
++		{
++			if (H.running)
++				return Err(409, "stop hosting first");
++			std::string err;
++			if (!JoinClient(GetStr(d, "host"), GetStr(d, "code"), GetStr(d, "name"), err))
++				return Err(502, err);
++			return Status();
++		}
++		if (sub == "/leave")
++		{
++			LeaveClient();
++			return Status();
++		}
++		if (sub == "/input")
++		{
++			if (!C.active)
++				return Err(409, "not in a session");
++			const uint32_t b = (uint32_t)GetInt(d, "b", 0);
++			const int8_t ax[4] = {(int8_t)std::clamp<int64_t>(GetInt(d, "lx", 0), -127, 127), (int8_t)std::clamp<int64_t>(GetInt(d, "ly", 0), -127, 127),
++								  (int8_t)std::clamp<int64_t>(GetInt(d, "rx", 0), -127, 127), (int8_t)std::clamp<int64_t>(GetInt(d, "ry", 0), -127, 127)};
++			uint32_t packed;
++			std::memcpy(&packed, ax, 4);
++			std::shared_ptr<tcp::socket> s;
++			{
++				std::scoped_lock l(C.m);
++				if (b == C.lastButtons && packed == C.lastAxes)
++					return OkSimple();
++				C.lastButtons = b;
++				C.lastAxes = packed;
++				s = C.sock;
++			}
++			std::string p;
++			PutU32(p, b);
++			for (int i = 0; i < 4; i++)
++				p.push_back((char)ax[i]);
++			std::scoped_lock wl(C.wm);
++			if (s)
++				SendMsg(*s, kInput, p);
++			return OkSimple();
++		}
++		return Err(404, "unknown route");
++	}
++} // namespace ControlApi
+diff --git a/src/gui/sdlgui/ControlCoop.h b/src/gui/sdlgui/ControlCoop.h
+new file mode 100644
+index 0000000..105edf0
+--- /dev/null
++++ b/src/gui/sdlgui/ControlCoop.h
+@@ -0,0 +1,16 @@
++#pragma once
++// LAN co-op: hooks used by the renderer / audio code on the host.
++#include <cstdint>
++
++namespace Coop
++{
++	// true while a hosted session has at least one guest that wants a picture. Cheap, safe from any thread.
++	bool WantFrame();
++	bool HasGuests();
++	// RGB (3 bytes per pixel, top row first). Copies the data and returns immediately; the encoder runs on its own thread.
++	void SubmitFrame(const uint8_t* rgb, int w, int h);
++	// interleaved signed 16-bit stereo at 48 kHz
++	void SubmitAudio(const int16_t* stereo, int frames);
++	// largest frame width the host wants (the renderer downscales to this)
++	int MaxWidth();
++} // namespace Coop
 diff --git a/src/gui/sdlgui/ControlGfx.cpp b/src/gui/sdlgui/ControlGfx.cpp
 new file mode 100644
 index 0000000..699acc1
@@ -2397,12 +3861,74 @@ index 0000000..d083ee8
 +		return Err(404, "no such route");
 +	}
 +} // namespace ControlApi
+diff --git a/src/gui/sdlgui/CoopRemote.h b/src/gui/sdlgui/CoopRemote.h
+new file mode 100644
+index 0000000..08573b2
+--- /dev/null
++++ b/src/gui/sdlgui/CoopRemote.h
+@@ -0,0 +1,56 @@
++#pragma once
++// The controller a co-op guest shows up as on the host. Wire button bit i = ProController button id (i + 1).
++#include "input/api/Controller.h"
++#include "input/emulated/EmulatedController.h"
++#include "input/emulated/ProController.h"
++
++#include <atomic>
++
++class CoopRemote : public ControllerBase
++{
++  public:
++	// Calibrate right away, while nothing is pressed: the first poll would otherwise record whatever the guest is
++	// holding at that moment as the "neutral" state and hide those buttons for the whole session.
++	CoopRemote(std::string_view uuid, std::string_view name) : ControllerBase(uuid, name) { calibrate(); }
++
++	std::string_view api_name() const override { return "Remote"; }
++	InputAPI::Type api() const override { return InputAPI::Remote; }
++	bool is_connected() override { return true; }
++
++	void Set(uint32_t buttons, int8_t lx, int8_t ly, int8_t rx, int8_t ry)
++	{
++		m_buttons = buttons;
++		m_axes = (uint32_t)(uint8_t)lx | ((uint32_t)(uint8_t)ly << 8) | ((uint32_t)(uint8_t)rx << 16) | ((uint32_t)(uint8_t)ry << 24);
++	}
++
++	ControllerState raw_state() override
++	{
++		ControllerState s;
++		const uint32_t b = m_buttons;
++		for (int i = 0; i < 17; i++)
++			if (b & (1u << i))
++				s.buttons.SetButtonState(kButton0 + i, true);
++		const uint32_t a = m_axes;
++		s.axis = {(int8_t)(a & 0xFF) / 127.f, (int8_t)((a >> 8) & 0xFF) / 127.f};
++		s.rotation = {(int8_t)((a >> 16) & 0xFF) / 127.f, (int8_t)((a >> 24) & 0xFF) / 127.f};
++		return s;
++	}
++
++	static void ApplyMapping(const std::shared_ptr<EmulatedController>& emu, const std::shared_ptr<ControllerBase>& pad)
++	{
++		for (int id = ProController::kButtonId_A; id <= ProController::kButtonId_StickR; id++)
++			emu->set_mapping((uint64)id, pad, kButton0 + (uint64)(id - 1));
++		emu->set_mapping(ProController::kButtonId_StickL_Up, pad, kAxisYN);
++		emu->set_mapping(ProController::kButtonId_StickL_Down, pad, kAxisYP);
++		emu->set_mapping(ProController::kButtonId_StickL_Left, pad, kAxisXN);
++		emu->set_mapping(ProController::kButtonId_StickL_Right, pad, kAxisXP);
++		emu->set_mapping(ProController::kButtonId_StickR_Up, pad, kRotationYN);
++		emu->set_mapping(ProController::kButtonId_StickR_Down, pad, kRotationYP);
++		emu->set_mapping(ProController::kButtonId_StickR_Left, pad, kRotationXN);
++		emu->set_mapping(ProController::kButtonId_StickR_Right, pad, kRotationXP);
++	}
++
++  private:
++	std::atomic<uint32_t> m_buttons{0};
++	std::atomic<uint32_t> m_axes{0};
++};
 diff --git a/src/gui/sdlgui/HttpServer.cpp b/src/gui/sdlgui/HttpServer.cpp
 new file mode 100644
-index 0000000..7894fc5
+index 0000000..9f84b4b
 --- /dev/null
 +++ b/src/gui/sdlgui/HttpServer.cpp
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,252 @@
 +#include "HttpServer.h"
 +
 +#include <boost/asio.hpp>
@@ -2521,6 +4047,21 @@ index 0000000..7894fc5
 +	{
 +		std::string out = "HTTP/1.1 " + std::to_string(res.status) + " " + ReasonPhrase(res.status) + "\r\n";
 +		out += "Content-Type: " + res.contentType + "\r\n";
++		if (res.stream)
++		{
++			out += "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
++			boost::system::error_code sec;
++			sock.set_option(tcp::no_delay(true), sec);
++			asio::write(sock, asio::buffer(out), sec);
++			if (sec)
++				return;
++			res.stream([&sock](const std::string& chunk) {
++				boost::system::error_code e;
++				asio::write(sock, asio::buffer(chunk), e);
++				return !e;
++			});
++			return;
++		}
 +		out += "Content-Length: " + std::to_string(res.body.size()) + "\r\n";
 +		out += "Cache-Control: no-store\r\n";
 +		out += "X-Content-Type-Options: nosniff\r\n";
@@ -2642,10 +4183,10 @@ index 0000000..7894fc5
 +uint16_t HttpServer::Port() const { return m_impl->port; }
 diff --git a/src/gui/sdlgui/HttpServer.h b/src/gui/sdlgui/HttpServer.h
 new file mode 100644
-index 0000000..da9daea
+index 0000000..e8a2c17
 --- /dev/null
 +++ b/src/gui/sdlgui/HttpServer.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,44 @@
 +#pragma once
 +// Minimal localhost-only HTTP/1.1 server (one request per connection). Used by the NEBULATOR UI.
 +
@@ -2668,6 +4209,9 @@ index 0000000..da9daea
 +	int status = 200;
 +	std::string contentType = "application/json";
 +	std::string body;
++	// when set, the response is streamed: headers go out first (no Content-Length), then this runs on the
++	// connection thread and calls write() for every chunk until write() returns false or it returns.
++	std::function<void(const std::function<bool(const std::string&)>& write)> stream;
 +};
 +
 +class HttpServer
@@ -2687,6 +4231,339 @@ index 0000000..da9daea
 +	struct Impl;
 +	std::unique_ptr<Impl> m_impl;
 +};
+diff --git a/src/gui/sdlgui/JpegEnc.cpp b/src/gui/sdlgui/JpegEnc.cpp
+new file mode 100644
+index 0000000..f4c56b2
+--- /dev/null
++++ b/src/gui/sdlgui/JpegEnc.cpp
+@@ -0,0 +1,311 @@
++#include "JpegEnc.h"
++
++#include <algorithm>
++#include <cmath>
++#include <vector>
++
++namespace JpegEnc
++{
++	namespace
++	{
++		const uint8_t kZig[64] = {0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
++								  35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63};
++		const uint8_t kQLuma[64] = {16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
++									18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99};
++		const uint8_t kQChroma[64] = {17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99, 99, 99, 47, 66, 99, 99, 99, 99, 99, 99,
++									  99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99};
++
++		// A valid (not size-optimal) Huffman code: a few short codes for the most common AC symbols, 9 bits for the rest.
++		struct Huff
++		{
++			uint8_t bitsCount[17] = {}; // number of codes per length 1..16
++			std::vector<uint8_t> vals;
++			uint16_t code[256] = {};
++			uint8_t len[256] = {};
++			void Build()
++			{
++				uint32_t c = 0;
++				size_t k = 0;
++				for (int l = 1; l <= 16; l++)
++				{
++					for (int i = 0; i < bitsCount[l]; i++, k++)
++					{
++						code[vals[k]] = (uint16_t)c;
++						len[vals[k]] = (uint8_t)l;
++						c++;
++					}
++					c <<= 1;
++				}
++			}
++		};
++
++		struct Tables
++		{
++			Huff dc, ac;
++			float cosT[8][8];
++			Tables()
++			{
++				// DC: categories 0..11, all 4 bits
++				dc.bitsCount[4] = 12;
++				for (int i = 0; i < 12; i++)
++					dc.vals.push_back((uint8_t)i);
++				dc.Build();
++				// AC
++				const uint8_t s4[] = {0x01, 0x00, 0x02, 0x11};
++				const uint8_t s6[] = {0x03, 0x21, 0x12, 0x04, 0x31, 0x05, 0x13, 0x41, 0x22, 0x06};
++				bool used[256] = {};
++				for (uint8_t s : s4)
++				{
++					ac.vals.push_back(s);
++					used[s] = true;
++				}
++				for (uint8_t s : s6)
++				{
++					ac.vals.push_back(s);
++					used[s] = true;
++				}
++				ac.bitsCount[4] = 4;
++				ac.bitsCount[6] = 10;
++				int rest = 0;
++				for (int run = 0; run < 16; run++)
++					for (int sz = 1; sz <= 10; sz++)
++					{
++						uint8_t s = (uint8_t)((run << 4) | sz);
++						if (!used[s])
++						{
++							ac.vals.push_back(s);
++							used[s] = true;
++							rest++;
++						}
++					}
++				if (!used[0xF0])
++				{
++					ac.vals.push_back(0xF0);
++					rest++;
++				}
++				ac.bitsCount[9] = (uint8_t)rest;
++				ac.Build();
++				for (int u = 0; u < 8; u++)
++					for (int x = 0; x < 8; x++)
++						cosT[u][x] = (float)(std::cos((2 * x + 1) * u * 3.14159265358979 / 16.0) * (u == 0 ? std::sqrt(0.125) : 0.5));
++			}
++		};
++		const Tables& T()
++		{
++			static const Tables t;
++			return t;
++		}
++
++		struct Bits
++		{
++			std::string& out;
++			uint32_t acc = 0;
++			int n = 0;
++			explicit Bits(std::string& o) : out(o) {}
++			void Put(uint32_t v, int bits)
++			{
++				acc = (acc << bits) | (v & ((1u << bits) - 1));
++				n += bits;
++				while (n >= 8)
++				{
++					uint8_t b = (uint8_t)(acc >> (n - 8));
++					out.push_back((char)b);
++					if (b == 0xFF)
++						out.push_back(0);
++					n -= 8;
++				}
++			}
++			void Flush()
++			{
++				if (n > 0)
++					Put(0x7F, 8 - n);
++			}
++		};
++
++		void Word(std::string& o, int v)
++		{
++			o.push_back((char)(v >> 8));
++			o.push_back((char)v);
++		}
++
++		void Dct(const float in[64], float out[64])
++		{
++			const auto& c = T().cosT;
++			float tmp[64];
++			for (int y = 0; y < 8; y++)
++				for (int u = 0; u < 8; u++)
++				{
++					float s = 0;
++					for (int x = 0; x < 8; x++)
++						s += in[y * 8 + x] * c[u][x];
++					tmp[y * 8 + u] = s;
++				}
++			for (int u = 0; u < 8; u++)
++				for (int v = 0; v < 8; v++)
++				{
++					float s = 0;
++					for (int y = 0; y < 8; y++)
++						s += tmp[y * 8 + u] * c[v][y];
++					out[v * 8 + u] = s;
++				}
++		}
++
++		inline int Category(int v)
++		{
++			v = v < 0 ? -v : v;
++			int c = 0;
++			while (v)
++			{
++				c++;
++				v >>= 1;
++			}
++			return c;
++		}
++
++		void EncodeBlock(Bits& bw, const float px[64], const float q[64], int& prevDc)
++		{
++			const Tables& t = T();
++			float d[64];
++			Dct(px, d);
++			int qc[64];
++			for (int i = 0; i < 64; i++)
++				qc[i] = (int)std::lround(d[kZig[i]] / q[kZig[i]]);
++			int diff = qc[0] - prevDc;
++			prevDc = qc[0];
++			int cat = Category(diff);
++			bw.Put(t.dc.code[cat], t.dc.len[cat]);
++			if (cat)
++				bw.Put((uint32_t)(diff < 0 ? diff - 1 : diff), cat);
++			int run = 0;
++			for (int i = 1; i < 64; i++)
++			{
++				int v = qc[i];
++				if (v == 0)
++				{
++					run++;
++					continue;
++				}
++				while (run > 15)
++				{
++					bw.Put(t.ac.code[0xF0], t.ac.len[0xF0]);
++					run -= 16;
++				}
++				int c = Category(v);
++				if (c > 10)
++					c = 10, v = v < 0 ? -1023 : 1023;
++				int sym = (run << 4) | c;
++				bw.Put(t.ac.code[sym], t.ac.len[sym]);
++				bw.Put((uint32_t)(v < 0 ? v - 1 : v), c);
++				run = 0;
++			}
++			if (run > 0)
++				bw.Put(t.ac.code[0x00], t.ac.len[0x00]);
++		}
++	} // namespace
++
++	std::string Encode(const uint8_t* rgb, int w, int h, int quality)
++	{
++		if (!rgb || w < 1 || h < 1 || w > 8192 || h > 8192)
++			return {};
++		quality = std::clamp(quality, 1, 100);
++		const int scale = quality < 50 ? 5000 / quality : 200 - quality * 2;
++		float qy[64], qc[64];
++		uint8_t qyb[64], qcb[64];
++		for (int i = 0; i < 64; i++)
++		{
++			int a = std::clamp((kQLuma[i] * scale + 50) / 100, 1, 255);
++			int b = std::clamp((kQChroma[i] * scale + 50) / 100, 1, 255);
++			qy[i] = (float)a;
++			qc[i] = (float)b;
++			qyb[i] = (uint8_t)a;
++			qcb[i] = (uint8_t)b;
++		}
++		const Tables& t = T();
++		std::string o;
++		o.reserve((size_t)w * h / 8 + 700);
++		o += "\xFF\xD8";
++		// DQT (ids 0, 1; values in zigzag order)
++		o += "\xFF\xDB";
++		Word(o, 2 + 65 * 2);
++		o.push_back(0);
++		for (int i = 0; i < 64; i++)
++			o.push_back((char)qyb[kZig[i]]);
++		o.push_back(1);
++		for (int i = 0; i < 64; i++)
++			o.push_back((char)qcb[kZig[i]]);
++		// SOF0: 3 components, Y is 2x2, Cb/Cr 1x1
++		o += "\xFF\xC0";
++		Word(o, 17);
++		o.push_back(8);
++		Word(o, h);
++		Word(o, w);
++		o.push_back(3);
++		o.push_back(1); o.push_back(0x22); o.push_back(0);
++		o.push_back(2); o.push_back(0x11); o.push_back(1);
++		o.push_back(3); o.push_back(0x11); o.push_back(1);
++		// DHT: DC table 0, AC table 0 (shared by all components)
++		auto dht = [&](int cls, const Huff& hf) {
++			o += "\xFF\xC4";
++			Word(o, 2 + 1 + 16 + (int)hf.vals.size());
++			o.push_back((char)(cls << 4));
++			for (int l = 1; l <= 16; l++)
++				o.push_back((char)hf.bitsCount[l]);
++			for (uint8_t v : hf.vals)
++				o.push_back((char)v);
++		};
++		dht(0, t.dc);
++		dht(1, t.ac);
++		// SOS
++		o += "\xFF\xDA";
++		Word(o, 12);
++		o.push_back(3);
++		o.push_back(1); o.push_back(0x00);
++		o.push_back(2); o.push_back(0x00);
++		o.push_back(3); o.push_back(0x00);
++		o.push_back(0); o.push_back(63); o.push_back(0);
++
++		Bits bw(o);
++		int pY = 0, pCb = 0, pCr = 0;
++		const int mw = (w + 15) / 16, mh = (h + 15) / 16;
++		auto px = [&](int x, int y, int ch) -> float {
++			x = std::min(x, w - 1);
++			y = std::min(y, h - 1);
++			const uint8_t* p = rgb + ((size_t)y * w + x) * 3;
++			const float r = p[0], g = p[1], b = p[2];
++			if (ch == 0)
++				return 0.299f * r + 0.587f * g + 0.114f * b - 128.f;
++			if (ch == 1)
++				return -0.168736f * r - 0.331264f * g + 0.5f * b;
++			return 0.5f * r - 0.418688f * g - 0.081312f * b;
++		};
++		float blk[64];
++		for (int my = 0; my < mh; my++)
++			for (int mx = 0; mx < mw; mx++)
++			{
++				for (int by = 0; by < 2; by++)
++					for (int bx = 0; bx < 2; bx++)
++					{
++						for (int y = 0; y < 8; y++)
++							for (int x = 0; x < 8; x++)
++								blk[y * 8 + x] = px(mx * 16 + bx * 8 + x, my * 16 + by * 8 + y, 0);
++						EncodeBlock(bw, blk, qy, pY);
++					}
++				for (int ch = 1; ch <= 2; ch++)
++				{
++					for (int y = 0; y < 8; y++)
++						for (int x = 0; x < 8; x++)
++						{
++							float s = 0;
++							for (int dy = 0; dy < 2; dy++)
++								for (int dx = 0; dx < 2; dx++)
++									s += px(mx * 16 + x * 2 + dx, my * 16 + y * 2 + dy, ch);
++							blk[y * 8 + x] = s * 0.25f;
++						}
++					EncodeBlock(bw, blk, qc, ch == 1 ? pCb : pCr);
++				}
++			}
++		bw.Flush();
++		o += "\xFF\xD9";
++		return o;
++	}
++} // namespace JpegEnc
+diff --git a/src/gui/sdlgui/JpegEnc.h b/src/gui/sdlgui/JpegEnc.h
+new file mode 100644
+index 0000000..095212b
+--- /dev/null
++++ b/src/gui/sdlgui/JpegEnc.h
+@@ -0,0 +1,10 @@
++#pragma once
++// Tiny baseline JPEG encoder (4:2:0) for the co-op video stream. No external dependencies.
++#include <cstdint>
++#include <string>
++
++namespace JpegEnc
++{
++	// rgb: tightly packed 3 bytes per pixel, row 0 on top. quality 1..100. Returns an empty string on bad input.
++	std::string Encode(const uint8_t* rgb, int w, int h, int quality);
++}
 diff --git a/src/gui/sdlgui/LinuxLtoShim.cpp b/src/gui/sdlgui/LinuxLtoShim.cpp
 new file mode 100644
 index 0000000..7f6a410
@@ -36627,6 +38504,41 @@ index bb4352d..0000000
 -	cevent.SetEventObject(slider);
 -	return slider->HandleWindowEvent(cevent);
 -}
+diff --git a/src/input/InputManager.cpp b/src/input/InputManager.cpp
+index 42b1db2..e19645d 100644
+--- a/src/input/InputManager.cpp
++++ b/src/input/InputManager.cpp
+@@ -483,6 +483,8 @@ bool InputManager::save(size_t player_index, std::string_view filename)
+ 
+ 	for (const auto& controller : emulated_controller->get_controllers())
+ 	{
++		if (controller->api() == InputAPI::Remote)
++			continue; // co-op guests are session-only
+ 		auto controller_node = emulated_controller_node.append_child("controller");
+ 
+ 		// general
+diff --git a/src/input/api/InputAPI.h b/src/input/api/InputAPI.h
+index a5f1f92..00727b7 100644
+--- a/src/input/api/InputAPI.h
++++ b/src/input/api/InputAPI.h
+@@ -17,6 +17,8 @@ namespace InputAPI
+ 		WGIGamepad,
+ 		WGIRawController,
+ 
++		Remote, // NEBULATOR co-op guest (never saved)
++
+ 		MAX
+ 	};
+ 
+@@ -42,6 +44,8 @@ namespace InputAPI
+ 			return "WGIRawController";
+ 		case SDLController:
+ 			return "SDLController";
++		case Remote:
++			return "Remote";
+ 		default:
+ 			break;
+ 		}
 diff --git a/src/input/api/SDL/SDLControllerProvider.cpp b/src/input/api/SDL/SDLControllerProvider.cpp
 index 3aa146a..0e8bcdd 100644
 --- a/src/input/api/SDL/SDLControllerProvider.cpp
