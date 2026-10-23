@@ -3758,10 +3758,10 @@ index 0000000..b410087
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlUpdate.cpp b/src/gui/sdlgui/ControlUpdate.cpp
 new file mode 100644
-index 0000000..d083ee8
+index 0000000..d490b52
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlUpdate.cpp
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,414 @@
 +// Self-update: asks GitHub whether a newer release exists, downloads its installer, checks the SHA-256 that is
 +// published next to it, then runs the installer silently and exits so the files can be replaced.
 +//
@@ -4145,15 +4145,29 @@ index 0000000..d083ee8
 +				file = g_u.file;
 +			}
 +#if BOOST_OS_WINDOWS
-+			std::wstring cmd = L"\"" + file.wstring() + L"\" /SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS";
++			// Run the installer through cmd so we can (a) log what it does and (b) bring the old version back if it fails.
++			// /FORCECLOSEAPPLICATIONS makes Inno Setup close NEBULATOR itself instead of waiting for it. The installer's own
++			// "Launch NEBULATOR" step reopens the new version.
++			wchar_t exePath[MAX_PATH]{};
++			GetModuleFileNameW(nullptr, exePath, MAX_PATH);
++			const fs::path logFile = file.parent_path() / "setup.log";
++			std::wstring cmd = L"cmd.exe /d /s /c \"\"" + file.wstring() + L"\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /LOG=\"" + logFile.wstring() +
++							   L"\" & if errorlevel 1 start \"\" \"" + exePath + L"\"\"";
 +			STARTUPINFOW si{};
 +			si.cb = sizeof(si);
++			si.dwFlags = STARTF_USESHOWWINDOW;
++			si.wShowWindow = SW_HIDE;
 +			PROCESS_INFORMATION pi{};
-+			if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &si, &pi))
++			if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &si, &pi))
 +				return Err(500, "couldn't start the installer");
 +			CloseHandle(pi.hThread);
 +			CloseHandle(pi.hProcess);
 +			RequestQuit(true);
++			// make sure we really go away so the installer can replace our files, even if the normal shutdown hangs
++			std::thread([] {
++				std::this_thread::sleep_for(std::chrono::seconds(4));
++				TerminateProcess(GetCurrentProcess(), 0);
++			}).detach();
 +			return OkSimple();
 +#else
 +			return Err(400, "automatic updates are only available in the Windows build");
