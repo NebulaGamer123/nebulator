@@ -172,16 +172,17 @@ index 4449f13..2aec1b4 100644
  }
  
 diff --git a/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp b/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
-index 6be50ec..edeb414 100644
+index 6be50ec..e33d623 100644
 --- a/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
 +++ b/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,6 @@
  #include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
 +#include "gui/sdlgui/Lockstep.h"
++#include <chrono>
  #include "PPCFunctionBoundaryTracker.h"
  #include "PPCRecompiler.h"
  #include "PPCRecompilerIml.h"
-@@ -59,16 +60,15 @@ void ATTR_MS_ABI (*PPCRecompiler_leaveRecompilerCode_unvisited)();
+@@ -59,16 +61,15 @@ void ATTR_MS_ABI (*PPCRecompiler_leaveRecompilerCode_unvisited)();
  
  PPCRecompilerInstanceData_t* ppcRecompilerInstanceData;
  
@@ -200,7 +201,14 @@ index 6be50ec..edeb414 100644
  	if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] != PPCRecompiler_leaveRecompilerCode_unvisited)
  		return;
  	s_ppcRecompilerState.recompilerSpinlock.lock();
-@@ -86,7 +86,7 @@ void PPCRecompiler_visitAddressNoBlock(uint32 enterAddress)
+@@ -82,11 +83,14 @@ void PPCRecompiler_visitAddressNoBlock(uint32 enterAddress)
+ 	s_singleRecompilationMutex.lock();
+ 	if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] == PPCRecompiler_leaveRecompilerCode_visited)
+ 	{
++		const auto t0 = std::chrono::steady_clock::now();
+ 		PPCRecompiler_recompileAtAddress(enterAddress);
++		if (Lockstep::Active())
++			Lockstep::DbgCompiled((uint64)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
  	}
  	s_singleRecompilationMutex.unlock();
  	return;
@@ -472,7 +480,7 @@ index 3ea6d7d..db76655 100644
  			IOSDispatchableCommand* dispatchCmd = _IPCAllocateDispatchableCommand();
  			dispatchCmd->body = *cmd;
 diff --git a/src/Cafe/OS/libs/TCL/TCL.cpp b/src/Cafe/OS/libs/TCL/TCL.cpp
-index b697cec..5e8aba6 100644
+index b697cec..ed1d95e 100644
 --- a/src/Cafe/OS/libs/TCL/TCL.cpp
 +++ b/src/Cafe/OS/libs/TCL/TCL.cpp
 @@ -1,4 +1,5 @@
@@ -481,17 +489,22 @@ index b697cec..5e8aba6 100644
  #include "Cafe/OS/libs/TCL/TCL.h"
  
  #include "HW/Latte/Core/LattePM4.h"
-@@ -76,11 +77,18 @@ namespace TCL
+@@ -76,11 +77,23 @@ namespace TCL
  		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::acquire);
  		if (readIndex == writeIndex)
  			return false;
-+		if (Lockstep::Active() && readIndex == Lockstep::GpuLimit())
++		if (Lockstep::GpuGated() && readIndex == Lockstep::GpuLimit())
 +			return false; // lockstep: the GPU only runs up to the snapshot taken at the last tick
  		cmdWord = tclRingBufferA[readIndex].load(std::memory_order::relaxed);
  		tclRingBufferA_readIndex.store((readIndex + 1) % TCL_RING_BUFFER_SIZE, std::memory_order::release);
  		return true;
  	}
  
++	uint32 TCLGetRingReadIndex()
++	{
++		return tclRingBufferA_readIndex.load(std::memory_order::acquire);
++	}
++
 +	uint32 TCLGetRingWriteIndex()
 +	{
 +		return tclRingBufferA_writeIndex.load(std::memory_order::acquire);
@@ -4912,10 +4925,10 @@ index 0000000..7f6a410
 +#endif
 diff --git a/src/gui/sdlgui/Lockstep.h b/src/gui/sdlgui/Lockstep.h
 new file mode 100644
-index 0000000..89c6e8d
+index 0000000..fe8221d
 --- /dev/null
 +++ b/src/gui/sdlgui/Lockstep.h
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,86 @@
 +#pragma once
 +// Lockstep netplay engine (experimental).
 +// Every player runs the game locally; only controller inputs are exchanged. For that to work the emulation must behave
@@ -4954,11 +4967,15 @@ index 0000000..89c6e8d
 +
 +	// ---- GPU gate ----
 +	uint32_t GpuLimit(); // ring index the GPU may read up to
++	bool GpuGated(); // false once the engine gave up gating a graphics thread that never answered
 +	void GpuPoll(); // GPU thread: called from every wait/idle loop iteration; parks until the next window
 +
 +	// ---- IOSU replies ----
 +	void IpcSubmitted(void* originalBody);
 +	bool IpcReplyDeferred(uint32_t coreIndex, void* originalBody); // true = Lockstep took the reply and will deliver it
++
++	// ---- diagnostics ----
++	void DbgCompiled(uint64_t micros); // a function was recompiled synchronously (lockstep forces this)
 +
 +	// ---- misc ----
 +	uint64_t AgreedUnixTime(); // seconds, identical on every PC of the session
@@ -5000,10 +5017,10 @@ index 0000000..89c6e8d
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepCore.cpp b/src/gui/sdlgui/LockstepCore.cpp
 new file mode 100644
-index 0000000..067e235
+index 0000000..d9679a5
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepCore.cpp
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,591 @@
 +// Lockstep engine, CPU/GPU/IOSU side. See Lockstep.h for the overall idea.
 +#include "Lockstep.h"
 +#include "CoopRemote.h"
@@ -5017,6 +5034,8 @@ index 0000000..067e235
 +#include "input/InputManager.h"
 +#include "input/emulated/ProController.h"
 +#include "input/emulated/VPADController.h"
++#include "config/ActiveSettings.h"
++#include <fstream>
 +
 +#include <chrono>
 +#include <condition_variable>
@@ -5029,6 +5048,7 @@ index 0000000..067e235
 +namespace TCL
 +{
 +	uint32 TCLGetRingWriteIndex();
++	uint32 TCLGetRingReadIndex();
 +}
 +
 +namespace Lockstep
@@ -5066,6 +5086,37 @@ index 0000000..067e235
 +		std::atomic<uint32_t> g_gpuSeen{0xFFFFFFFFu};
 +		std::atomic<bool> g_gpuAlive{false};
 +		uint32_t g_gpuPrev = 0; // GPU thread only
++
++		std::atomic<bool> g_gpuUngated{false}; // the graphics thread never answered: stop gating it so the game can at least run
++		uint32_t g_gpuMisses = 0;
++
++		// ---------------------------------------------------------------- diagnostics (watchdog thread + engine.log)
++		std::atomic<uint64_t> g_dbgSys{0}, g_dbgIdle{0}, g_dbgSlices{0}, g_dbgWin{0}, g_dbgPoll{0};
++		std::atomic<uint32_t> g_dbgTick{0};
++		std::atomic<uint64_t> g_dbgCompiles{0}, g_dbgCompileUs{0};
++		std::atomic<bool> g_dbgRun{false};
++		std::thread g_dbgThread;
++		std::mutex g_dbgLogM;
++
++		void EngineLog(const std::string& line, bool toUi)
++		{
++			{
++				std::scoped_lock l(g_dbgLogM);
++				try
++				{
++					const fs::path dir = ActiveSettings::GetUserDataPath() / "lockstep";
++					std::error_code ec;
++					fs::create_directories(dir, ec);
++					std::ofstream f(dir / "engine.log", std::ios::app);
++					f << line << "\n";
++				}
++				catch (...)
++				{
++				}
++			}
++			if (toUi)
++				Net::Log(line);
++		}
 +
 +		// ---------------------------------------------------------------- IOSU replies
 +		struct IpcEntry
@@ -5189,17 +5240,28 @@ index 0000000..067e235
 +		void GpuWindow()
 +		{
 +			const bool expectGpu = LatteGPUState.gx2InitCalled != 0;
-+			if (!expectGpu)
++			if (!expectGpu || g_gpuUngated.load())
 +				return;
++			g_dbgWin++;
 +			g_gpuLimit.store(TCL::TCLGetRingWriteIndex(), std::memory_order_release);
 +			const uint32_t e = g_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
 +			const auto start = Clock::now();
++			// a graphics thread that has never answered gets only a short wait; one that is just busy (shader compiles) gets longer
++			const bool alive = g_gpuAlive.load();
++			const auto limit = std::chrono::milliseconds(alive ? 8000 : 400);
 +			while (g_gpuSeen.load(std::memory_order_acquire) != e)
 +			{
-+				if (Clock::now() - start > std::chrono::seconds(g_gpuAlive.load() ? 20 : 15))
++				if (Clock::now() - start > limit)
 +				{
 +					g_impure++;
-+					Net::Log("The graphics thread did not finish a frame in time (tick " + std::to_string(g_tick) + ")");
++					g_gpuMisses++;
++					if (g_gpuMisses <= 5 || g_gpuMisses % 50 == 0)
++						EngineLog("The graphics thread did not finish a frame in time (tick " + std::to_string(g_tick) + ", " + (alive ? "it was running" : "it has never answered") + ", miss #" + std::to_string(g_gpuMisses) + ")", true);
++					if (!alive && g_gpuMisses >= 3)
++					{
++						g_gpuUngated = true;
++						EngineLog("The graphics thread never reported in: running it without lockstep gating from now on. This session will NOT stay in sync.", true);
++					}
 +					break;
 +				}
 +				std::this_thread::sleep_for(std::chrono::microseconds(15));
@@ -5314,6 +5376,7 @@ index 0000000..067e235
 +
 +	void SliceBegin(int32_t startRemaining)
 +	{
++		g_dbgSlices.fetch_add(1, std::memory_order_relaxed);
 +		g_sliceStart = startRemaining;
 +		g_inSlice = true;
 +	}
@@ -5328,7 +5391,11 @@ index 0000000..067e235
 +		g_inSlice = false;
 +	}
 +
-+	void IdleStep() { g_cycNum.fetch_add(kIdleStep * kCpuShare, std::memory_order_relaxed); }
++	void IdleStep()
++	{
++		g_dbgIdle.fetch_add(1, std::memory_order_relaxed);
++		g_cycNum.fetch_add(kIdleStep * kCpuShare, std::memory_order_relaxed);
++	}
 +
 +	bool UseAudioClock(uint64_t& next)
 +	{
@@ -5346,27 +5413,34 @@ index 0000000..067e235
 +
 +	void OnSystemEvents()
 +	{
++		g_dbgSys.fetch_add(1, std::memory_order_relaxed);
 +		if (!g_started)
 +		{
 +			g_started = true;
 +			AttachPads();
 +			g_deadline = Clock::now();
 +			g_nextTickV = VirtualCycles() + kTickCycles;
++			EngineLog("First system event reached: the game's CPU scheduler is running", false);
 +			Net::Log("Lockstep started (" + std::to_string(Net::PlayerCount()) + " player(s), delay " + std::to_string(Net::InputDelay()) + " frames)");
 +			return;
 +		}
 +		if (VirtualCycles() < g_nextTickV)
 +			return;
 +		g_nextTickV += kTickCycles;
++		g_dbgTick.store(g_tick, std::memory_order_relaxed);
 +		DoTick();
 +	}
 +
 +	// ======================================================================== public: GPU
 +	uint32_t GpuLimit() { return g_gpuLimit.load(std::memory_order_acquire); }
++	bool GpuGated() { return Active() && !g_gpuUngated.load(std::memory_order_relaxed); }
 +
 +	void GpuPoll()
 +	{
++		g_dbgPoll.fetch_add(1, std::memory_order_relaxed);
 +		g_gpuAlive.store(true, std::memory_order_relaxed);
++		if (g_gpuUngated.load(std::memory_order_relaxed))
++			return;
 +		const uint32_t e = g_epoch.load(std::memory_order_acquire);
 +		// the loop iteration that just ended began after we last saw g_gpuPrev
 +		g_gpuSeen.store(g_gpuPrev, std::memory_order_release);
@@ -5375,9 +5449,15 @@ index 0000000..067e235
 +			g_gpuPrev = e; // a new window opened while we were busy: go around once more
 +			return;
 +		}
-+		while (Active() && g_epoch.load(std::memory_order_acquire) == e && !Latte_GetStopSignal())
++		while (Active() && !g_gpuUngated.load(std::memory_order_relaxed) && g_epoch.load(std::memory_order_acquire) == e && !Latte_GetStopSignal())
 +			std::this_thread::sleep_for(std::chrono::microseconds(20));
 +		g_gpuPrev = g_epoch.load(std::memory_order_acquire);
++	}
++
++	void DbgCompiled(uint64_t micros)
++	{
++		g_dbgCompiles.fetch_add(1, std::memory_order_relaxed);
++		g_dbgCompileUs.fetch_add(micros, std::memory_order_relaxed);
 +	}
 +
 +	// ======================================================================== public: IOSU
@@ -5411,6 +5491,70 @@ index 0000000..067e235
 +	bool InterpreterOnly() { return g_interpOnly.load(); }
 +	void SetInterpreterOnly(bool v) { g_interpOnly = v; }
 +
++
++	namespace
++	{
++		void Watchdog()
++		{
++			uint64_t pSys = 0, pIdle = 0, pSl = 0, pWin = 0, pPoll = 0;
++			int stalledSecs = 0, sec = 0;
++			bool loggedInit = false;
++			try
++			{
++				std::error_code ec;
++				fs::remove(ActiveSettings::GetUserDataPath() / "lockstep" / "engine.log", ec); // one log per session
++			}
++			catch (...)
++			{
++			}
++			EngineLog("---- lockstep session started ----", false);
++			while (g_dbgRun.load() && Active())
++			{
++				for (int i = 0; i < 10 && g_dbgRun.load(); i++)
++					std::this_thread::sleep_for(std::chrono::milliseconds(100));
++				if (!g_dbgRun.load())
++					break;
++				sec++;
++				const uint64_t sys = g_dbgSys.load(), idle = g_dbgIdle.load(), sl = g_dbgSlices.load(), win = g_dbgWin.load(), poll = g_dbgPoll.load();
++				const bool gx2 = LatteGPUState.gx2InitCalled != 0;
++				if (gx2 && !loggedInit)
++				{
++					loggedInit = true;
++					EngineLog("The game initialised the graphics system (GX2Init) after " + std::to_string(sec) + " s", true);
++				}
++				std::string ipc = "?";
++				{
++					std::unique_lock l(g_ipcM, std::try_to_lock);
++					if (l.owns_lock())
++					{
++						int n = 0;
++						for (auto& [k, e] : g_ipc)
++							if (!e.done && !e.exempt)
++								n++;
++						ipc = std::to_string(n) + "/" + std::to_string(g_ipc.size());
++					}
++				}
++				char buf[420];
++				snprintf(buf, sizeof(buf),
++					"t=%ds tick=%u sysEv/s=%llu idle/s=%llu slices/s=%llu | gx2=%d gpuAlive=%d ungated=%d epoch=%u seen=%u limit=%u ring r/w=%u/%u polls/s=%llu windows/s=%llu | ipc pending=%s impure=%u stalls=%u virtCycles=%llu | syncCompiles=%llu (%llu ms total)",
++					sec, g_dbgTick.load(), (unsigned long long)(sys - pSys), (unsigned long long)(idle - pIdle), (unsigned long long)(sl - pSl), gx2 ? 1 : 0, g_gpuAlive.load() ? 1 : 0, g_gpuUngated.load() ? 1 : 0,
++					g_epoch.load(), g_gpuSeen.load(), g_gpuLimit.load(), TCL::TCLGetRingReadIndex(), TCL::TCLGetRingWriteIndex(), (unsigned long long)(poll - pPoll), (unsigned long long)(win - pWin), ipc.c_str(), g_impure, g_stalls,
++					(unsigned long long)VirtualCycles(), (unsigned long long)g_dbgCompiles.load(), (unsigned long long)(g_dbgCompileUs.load() / 1000));
++				EngineLog(buf, false);
++				if (sys == pSys)
++				{
++					stalledSecs++;
++					if (stalledSecs == 3)
++						EngineLog("The game's CPU scheduler has not reached its system-event loop for 3 s (virtual time cannot advance)", true);
++				}
++				else
++					stalledSecs = 0;
++				pSys = sys; pIdle = idle; pSl = sl; pWin = win; pPoll = poll;
++			}
++			g_dbgRun = false;
++		}
++	} // namespace
++
 +	void SessionStarting()
 +	{
 +		g_cycNum = 0;
@@ -5423,17 +5567,31 @@ index 0000000..067e235
 +		g_gpuSeen = 0xFFFFFFFFu;
 +		g_gpuPrev = 0;
 +		g_gpuAlive = false;
++		g_gpuUngated = false;
++		g_gpuMisses = 0;
++		g_dbgSys = g_dbgIdle = g_dbgSlices = g_dbgWin = g_dbgPoll = 0;
++		g_dbgCompiles = g_dbgCompileUs = 0;
++		g_dbgTick = 0;
 +		{
 +			std::scoped_lock l(g_ipcM);
 +			g_ipc.clear();
 +			g_ipcByBody.clear();
 +		}
 +		g_active = true;
++		if (!g_dbgRun.exchange(true))
++		{
++			if (g_dbgThread.joinable())
++				g_dbgThread.join();
++			g_dbgThread = std::thread(Watchdog);
++		}
 +	}
 +
 +	void GameStopped()
 +	{
 +		g_active = false;
++		g_dbgRun = false;
++		if (g_dbgThread.joinable())
++			g_dbgThread.join();
 +		for (auto& p : g_pads)
 +			p.reset();
 +		g_local.reset();
