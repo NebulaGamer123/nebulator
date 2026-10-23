@@ -5439,10 +5439,10 @@ index 0000000..067e235
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepNet.cpp b/src/gui/sdlgui/LockstepNet.cpp
 new file mode 100644
-index 0000000..a7592cb
+index 0000000..39058cd
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepNet.cpp
-@@ -0,0 +1,1622 @@
+@@ -0,0 +1,1646 @@
 +// Lockstep netplay: session (TCP 17810), compatibility check, shared save, input exchange, desync report,
 +// the Determinism Lab and the /api/coop/lock/* routes. The emulation side is in LockstepCore.cpp.
 +//
@@ -5666,10 +5666,11 @@ index 0000000..a7592cb
 +					return true;
 +				for (auto it = stdfs::recursive_directory_iterator(dir, ec); !ec && it != stdfs::recursive_directory_iterator(); it.increment(ec))
 +				{
-+					if (!it->is_regular_file())
++					std::error_code e2;
++					if (!it->is_regular_file(e2))
 +						continue;
-+					const std::string rel = stdfs::relative(it->path(), dir).generic_string();
-+					const uint64_t sz = (uint64_t)it->file_size();
++					const std::string rel = it->path().lexically_relative(dir).generic_string();
++					const uint64_t sz = (uint64_t)it->file_size(e2);
 +					if (out.size() + sz + rel.size() + 16 > kMaxSave)
 +						return false;
 +					const uint16_t pl = (uint16_t)rel.size();
@@ -6763,7 +6764,7 @@ index 0000000..a7592cb
 +
 +namespace ControlApi
 +{
-+	HttpResponse HandleLock(const HttpRequest& req, const std::string& sub)
++	static HttpResponse HandleLockImpl(const HttpRequest& req, const std::string& sub)
 +	{
 +		using namespace Lockstep::Net;
 +		auto status = [&]() {
@@ -6783,7 +6784,7 @@ index 0000000..a7592cb
 +
 +		if (sub == "/host/start")
 +		{
-+			std::scoped_lock l(s.m);
++			std::unique_lock l(s.m);
 +			if (!s.role.empty())
 +				return Err(409, "already in a session");
 +			if (s.lab.mode != Mode::Off)
@@ -6823,12 +6824,13 @@ index 0000000..a7592cb
 +			s.pinger = std::thread(PingLoop);
 +			RebuildRosterLocked(s.name);
 +			LogLocked("Hosting with code " + s.code);
++			l.unlock();
 +			return status();
 +		}
 +		if (sub == "/host/stop" || sub == "/leave")
 +		{
 +			{
-+				std::scoped_lock l(s.m);
++				std::unique_lock l(s.m);
 +				if (s.state == "running")
 +					return Err(409, "a game is running");
 +				StopAllLocked();
@@ -6846,7 +6848,7 @@ index 0000000..a7592cb
 +			if (host.empty() && !HostFromCode(code, host))
 +				return Err(400, "That code does not look right. It has 10 letters and numbers.");
 +			{
-+				std::scoped_lock l(s.m);
++				std::unique_lock l(s.m);
 +				if (!s.role.empty())
 +					return Err(409, "already in a session");
 +				s.stop = false;
@@ -6919,7 +6921,7 @@ index 0000000..a7592cb
 +				return Err(403, w.IsObject() && w.HasMember("msg") ? w["msg"].GetString() : "Refused.");
 +			}
 +			{
-+				std::scoped_lock l(s.m);
++				std::unique_lock l(s.m);
 +				s.role = "guest";
 +				s.state = "idle";
 +				s.slot = w["slot"].GetInt();
@@ -6946,7 +6948,7 @@ index 0000000..a7592cb
 +			const std::string man = BuildManifest(id, &err);
 +			if (!err.empty())
 +				return Err(409, err);
-+			std::scoped_lock l(s.m);
++			std::unique_lock l(s.m);
 +			if (s.role != "host" || s.state == "running")
 +				return Err(409, "not hosting");
 +			s.titleId = id;
@@ -6957,11 +6959,12 @@ index 0000000..a7592cb
 +				g->problems.clear();
 +			}
 +			BroadcastRosterLocked();
++			l.unlock();
 +			return status();
 +		}
 +		if (sub == "/host/settings")
 +		{
-+			std::scoped_lock l(s.m);
++			std::unique_lock l(s.m);
 +			if (s.role != "host" || s.state == "running")
 +				return Err(409, "not available now");
 +			if (Has(d, "delay"))
@@ -6973,11 +6976,12 @@ index 0000000..a7592cb
 +			if (Has(d, "shareSave"))
 +				s.shareSave = GetBool(d, "shareSave", true);
 +			BroadcastRosterLocked();
++			l.unlock();
 +			return status();
 +		}
 +		if (sub == "/host/launch")
 +		{
-+			std::scoped_lock l(s.m);
++			std::unique_lock l(s.m);
 +			if (s.role != "host" || s.titleId.empty())
 +				return Err(409, "choose a game first");
 +			if (s.state == "running")
@@ -7013,11 +7017,12 @@ index 0000000..a7592cb
 +				g->Send(START, j.sb.GetString());
 +			s.nPlayers = players;
 +			BeginGameLocked(std::to_string(now), delay, s.hashEvery, s.cpu, players, s.titleId, false);
++			l.unlock();
 +			return status();
 +		}
 +		if (sub == "/lab/record" || sub == "/lab/replay")
 +		{
-+			std::scoped_lock l(s.m);
++			std::unique_lock l(s.m);
 +			if (!s.role.empty())
 +				return Err(409, "leave the session first");
 +			if (s.state == "running" || s.lab.mode != Mode::Off)
@@ -7050,19 +7055,38 @@ index 0000000..a7592cb
 +					Lockstep::g_active = false;
 +				}
 +			}).detach();
++			l.unlock();
 +			return status();
 +		}
 +		if (sub == "/lab/reset")
 +		{
-+			std::scoped_lock l(s.m);
++			std::unique_lock l(s.m);
 +			if (s.state == "running")
 +				return Err(409, "a game is running");
 +			std::error_code ec;
 +			stdfs::remove_all(LabDir(), ec);
 +			s.lab = LabState{};
++			l.unlock();
 +			return status();
 +		}
 +		return Err(404, "unknown route");
++	}
++
++	HttpResponse HandleLock(const HttpRequest& req, const std::string& sub)
++	{
++		try
++		{
++			return HandleLockImpl(req, sub);
++		}
++		catch (const std::exception& e)
++		{
++			Lockstep::Net::Log(std::string("Internal error on ") + sub + ": " + e.what());
++			return Err(500, std::string("Lockstep error (") + sub + "): " + e.what());
++		}
++		catch (...)
++		{
++			return Err(500, "Lockstep error (unknown) on " + sub);
++		}
 +	}
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/SdlKeys.h b/src/gui/sdlgui/SdlKeys.h

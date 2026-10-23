@@ -92,7 +92,7 @@
   const gameName = id => { const g = games().find(x => x.titleId === id); return g ? NEB.firstLine(g.name) : id || ''; };
   const lkRunning = () => !!(lk && lk.state === 'running');
 
-  const codeBoxes = c => { const a = [...(c || '')]; return a.map((ch, i) => [h('b', null, ch), i === 4 ? h('i', { class: 'cp-gap' }) : null]); };
+  const codeBoxes = c => [...(c || '')].flatMap((ch, i) => i === 4 ? [h('b', null, ch), h('i', { class: 'cp-gap' })] : [h('b', null, ch)]);
 
   function lkSessionBody() {
     if (!lk) return note('This NEBULATOR core has no lockstep support yet. Update NEBULATOR and restart it.');
@@ -149,7 +149,7 @@
     const pickable = lk.role === 'host' && !lkRunning();
     const sel = h('select', { class: 'cp-select', disabled: !pickable, onchange: e => { form.pickId = e.target.value; lkPost('host/pick', { titleId: form.pickId }); } },
       h('option', { value: '' }, 'Choose a game…'),
-      games().map(g => h('option', { value: g.titleId, selected: g.titleId === (lk.titleId || form.pickId) }, NEB.firstLine(g.name) + ' · v' + g.version)));
+      games().map(g => h('option', { value: g.titleId, selected: String(g.titleId).toLowerCase() === String(lk.titleId || form.pickId || '').toLowerCase() }, NEB.firstLine(g.name) + ' · v' + g.version)));
     const canStart = lk.role === 'host' && lk.titleId && players.length >= 1 && players.every(p => !p.problems || !p.problems.length) && !lkRunning();
     return h('div', null,
       h('div', { class: 'cp-guests' }, rows),
@@ -187,7 +187,7 @@
     const idle = lk && !lkRunning();
     const sel = h('select', { class: 'cp-select', disabled: !idle, onchange: e => { form.pickId = e.target.value; } },
       h('option', { value: '' }, 'Choose a game…'),
-      games().map(g => h('option', { value: g.titleId, selected: g.titleId === (lab.titleId || form.pickId) }, NEB.firstLine(g.name) + ' · v' + g.version)));
+      games().map(g => h('option', { value: g.titleId, selected: String(g.titleId).toLowerCase() === String(lab.titleId || form.pickId || '').toLowerCase() }, NEB.firstLine(g.name) + ' · v' + g.version)));
     const res = lab.result;
     return h('div', null,
       note('Runs a game twice on this PC with the same button presses and checks both runs match. If they do, that game should work in lockstep. Your save is backed up and put back for you. Step 1: pick a game, press Record, play for a minute, then close the game. Step 2: press Replay and just watch (do not press anything).'),
