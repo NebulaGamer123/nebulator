@@ -3758,10 +3758,10 @@ index 0000000..b410087
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlUpdate.cpp b/src/gui/sdlgui/ControlUpdate.cpp
 new file mode 100644
-index 0000000..d490b52
+index 0000000..d38fa7c
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlUpdate.cpp
-@@ -0,0 +1,414 @@
+@@ -0,0 +1,417 @@
 +// Self-update: asks GitHub whether a newer release exists, downloads its installer, checks the SHA-256 that is
 +// published next to it, then runs the installer silently and exits so the files can be replaced.
 +//
@@ -4151,7 +4151,10 @@ index 0000000..d490b52
 +			wchar_t exePath[MAX_PATH]{};
 +			GetModuleFileNameW(nullptr, exePath, MAX_PATH);
 +			const fs::path logFile = file.parent_path() / "setup.log";
-+			std::wstring cmd = L"cmd.exe /d /s /c \"\"" + file.wstring() + L"\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /LOG=\"" + logFile.wstring() +
++			// install over the copy that is running right now, wherever it lives (installed, portable or moved), so the version
++			// that keeps asking for the update is the one that actually gets replaced
++			const fs::path appDir = fs::path(exePath).parent_path();
++			std::wstring cmd = L"cmd.exe /d /s /c \"\"" + file.wstring() + L"\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /DIR=\"" + appDir.wstring() + L"\" /LOG=\"" + logFile.wstring() +
 +							   L"\" & if errorlevel 1 start \"\" \"" + exePath + L"\"\"";
 +			STARTUPINFOW si{};
 +			si.cb = sizeof(si);
