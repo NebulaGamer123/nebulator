@@ -92,37 +92,40 @@
   const gameName = id => { const g = games().find(x => x.titleId === id); return g ? NEB.firstLine(g.name) : id || ''; };
   const lkRunning = () => !!(lk && lk.state === 'running');
 
+  const codeBoxes = c => { const a = [...(c || '')]; return a.map((ch, i) => [h('b', null, ch), i === 4 ? h('i', { class: 'cp-gap' }) : null]); };
+
   function lkSessionBody() {
     if (!lk) return note('This NEBULATOR core has no lockstep support yet. Update NEBULATOR and restart it.');
     if (lk.role === 'host') {
       return h('div', null,
-        note('Friends join with this code. Everyone needs NEBULATOR, their own copy of the game, and to be able to reach this PC (same Wi-Fi, a VPN like Tailscale, or a forwarded port).'),
-        h('div', { class: 'cp-code', title: 'Join code' }, [...(lk.code || '')].map(c => h('b', null, c))),
-        h('p', { class: 'lead mono' }, 'This PC: ' + (lk.ip || 'unknown') + ':' + (lk.port || 17810)),
+        note('Give your friends this code. They type it in the “Join” box on their Co-op tab. That is all they need.'),
+        h('div', { class: 'cp-code', title: 'Join code' }, codeBoxes(lk.code)),
+        h('p', { class: 'lead dim' }, 'Works for friends on the same Wi-Fi or on a VPN like Tailscale.'),
         h('button', { class: 'btn danger', disabled: lkRunning(), onclick: () => lkPost('host/stop') }, 'Close session'));
     }
     if (lk.role === 'guest') {
       return h('div', null,
-        h('p', { class: 'lead' }, lk.state === 'running' ? 'Playing as Player ' + (lk.slot + 1) + '.' : 'Connected as Player ' + (lk.slot + 1) + '. Waiting for the host to start the game.'),
-        h('p', { class: 'lead mono' }, 'Host: ' + (lk.hostAddr || '')),
+        h('p', { class: 'lead' }, lk.state === 'running' ? 'Playing as Player ' + (lk.slot + 1) + '.' : 'You joined as Player ' + (lk.slot + 1) + '. Waiting for the host to pick a game and start.'),
         h('button', { class: 'btn danger', disabled: lkRunning(), onclick: () => lkPost('leave') }, 'Leave session'));
     }
     return h('div', { class: 'cp-cols tight' },
-      h('div', null, h('h3', { class: 'cp-h3' }, 'Host a session'),
+      h('div', null, h('h3', { class: 'cp-h3' }, 'I want to host'),
         field('Your name', textIn('lkName', 'e.g. Harrold', { max: 24 })),
         h('button', { class: 'btn primary', onclick: () => lkPost('host/start', { name: form.lkName }) }, 'Start hosting'),
-        note('The first time, Windows may ask to allow NEBULATOR on your network. Choose Private networks.')),
-      h('div', null, h('h3', { class: 'cp-h3' }, 'Join a session'),
-        field('Host address', textIn('lkIp', 'e.g. 192.168.1.23', { max: 60 })),
-        field('Join code', textIn('lkCode', 'ABCDE', { max: 8, upper: true, enter: doLkJoin })),
+        note('You get a code to share. The first time, Windows may ask to allow NEBULATOR on your network: choose Private.')),
+      h('div', null, h('h3', { class: 'cp-h3' }, 'I have a code'),
+        field('Join code', textIn('lkCode', 'ABCDE-FGHIJ', { max: 14, upper: true, enter: doLkJoin })),
         field('Your name', textIn('lkName', 'e.g. Sam', { max: 24 })),
         lk.error ? h('p', { class: 'lead cp-err' }, lk.error) : null,
-        h('button', { class: 'btn primary', onclick: doLkJoin }, 'Join')));
+        h('button', { class: 'btn primary', onclick: doLkJoin }, 'Join'),
+        h('button', { class: 'linkbtn', onclick: () => { form.lkShowAddr = !form.lkShowAddr; render(); } }, form.lkShowAddr ? 'Hide manual address' : 'Code not working?'),
+        form.lkShowAddr ? [field('Host address (optional)', textIn('lkIp', 'e.g. 192.168.1.23', { max: 60 })), note('Only needed if the host is somewhere unusual. Normally the code is enough.')] : null));
   }
   function doLkJoin() {
-    if (!form.lkIp.trim()) return NEB.toast('Type the host address');
     if (!form.lkCode.trim()) return NEB.toast('Type the join code');
-    lkPost('join', { host: form.lkIp.trim(), code: form.lkCode.trim(), name: (form.lkName || '').trim() || 'Guest' });
+    const body = { code: form.lkCode.trim(), name: (form.lkName || '').trim() || 'Guest' };
+    if (form.lkShowAddr && form.lkIp.trim()) body.host = form.lkIp.trim();
+    lkPost('join', body);
   }
 
   function manifestLines(m) {
@@ -135,7 +138,7 @@
   }
 
   function lkPlayersBody() {
-    if (!lk || !lk.role) return note('Start or join a session first (open “Session” above).');
+    if (!lk || !lk.role) return note('Start or join a session first.');
     const players = lk.players || [];
     const rows = players.map(p => h('div', { class: 'cp-g lk' },
       h('b', null, 'Player ' + (p.slot + 1)),
@@ -157,36 +160,26 @@
         ? h('div', { class: 'cp-row', style: 'margin-top:14px' },
           h('button', { class: 'btn primary', disabled: !canStart, onclick: () => lkPost('host/launch') }, lkRunning() ? 'Running' : 'Start game for everyone'),
           players.length < 2 ? h('span', { class: 'hint' }, 'Works with one player too: handy for testing.') : null)
-        : h('p', { class: 'lead dim' }, 'Only the host starts the game. It opens on your PC automatically.'),
-      note('Everyone plays with a Pro Controller layout in lockstep (GamePad touch and motion are not sent). Rule-changing graphics packs must match the host; looks-only packs (resolution, shaders, textures) can differ per player.'));
+        : h('p', { class: 'lead dim' }, 'Only the host starts the game. It opens on your PC by itself.'),
+      note('Everyone plays with a Pro Controller layout (GamePad touch and motion are not sent). Graphics packs that only change looks (resolution, shadows, filters) can differ per player. Packs that change how the game plays, like FPS++, must match the host.'));
   }
 
-  function lkSyncBody() {
-    const s = (lk && lk.settings) || { delay: 0, hashEvery: 30, cpu: 'recompiler' };
+  function lkAdvBody() {
+    const s0 = (lk && lk.settings) || { delay: 0, hashEvery: 30, cpu: 'recompiler', shareSave: true };
     const host = lk && lk.role === 'host' && !lkRunning();
-    const lock = !host ? { disabled: true } : {};
-    return h('div', { class: 'cp-opts' },
-      h('div', null, h('span', { class: 'hint' }, 'Input delay'),
-        seg([[0, 'Auto'], [2, '2 frames'], [3, '3'], [4, '4'], [6, '6'], [8, '8']], s.delay, v => host && lkPost('host/settings', { delay: +v })),
-        note('Frames of delay between pressing a button and the game seeing it, the same for everyone. Auto uses the slowest connection in the session. Lower feels better; too low causes stalls.')),
-      h('div', null, h('span', { class: 'hint' }, 'CPU mode'),
-        seg([['recompiler', 'Recompiler (faster)'], ['interpreter', 'Interpreter (safest)']], s.cpu, v => host && lkPost('host/settings', { cpu: v })),
-        note('Lockstep always runs on a single emulated core so both PCs execute exactly the same steps. The interpreter is much slower but removes one possible source of drift.')),
-      h('div', null, h('span', { class: 'hint' }, 'State check every'),
-        seg([[15, '0.25 s'], [30, '0.5 s'], [60, '1 s']], s.hashEvery, v => host && lkPost('host/settings', { hashEvery: +v })),
-        note('How often players compare a fingerprint of the game’s memory. A mismatch means the games drifted apart (a desync).')),
-      !host ? h('p', { class: 'lead dim' }, 'The host chooses these. They are locked while a game is running.') : null);
-  }
-
-  function lkSaveBody() {
-    const s = (lk && lk.settings) || { shareSave: true };
-    const host = lk && lk.role === 'host' && !lkRunning();
+    const row = (title, what, ctl) => h('div', { class: 'cp-set' }, h('div', { class: 'cp-set-h' }, h('b', null, title), ctl), h('p', { class: 'lead dim' }, what));
     return h('div', null,
-      h('div', { class: 'trow' }, h('div', null, h('b', null, 'Share the host’s save'), h('span', { class: 'hint' }, 'Everyone starts from the same save so the games match.')),
-        toggle(s.shareSave !== false, v => host && lkPost('host/settings', { shareSave: v }))),
-      note('When the game starts, each guest’s own save for this game is backed up and replaced by the host’s. Because every PC runs the same steps, all of them end the session with the same save. Your backup is kept in your NEBULATOR data folder under lockstep/backups.'),
-      lk && lk.backupDir ? h('p', { class: 'lead mono' }, 'Last backup: ' + lk.backupDir) : null,
-      note('Skylanders figures are not shared yet. Each player’s portal is left as it is for now.'));
+      note('The defaults are right for almost everyone. Only the host can change these, and only before the game starts.'),
+      row('Input delay', 'How long the game waits for everyone’s buttons before moving on. Auto picks it from your connection. If the game keeps freezing for a moment, raise it. Lower feels snappier but can cause freezes.',
+        seg([[0, 'Auto'], [2, '2'], [3, '3'], [4, '4'], [6, '6'], [8, '8']], s0.delay, v => host && lkPost('host/settings', { delay: +v }))),
+      row('Speed', 'Fast is normal. Switch to Safe only if players keep drifting out of sync (see Troubleshooting). Safe is much slower.',
+        seg([['recompiler', 'Fast'], ['interpreter', 'Safe']], s0.cpu, v => host && lkPost('host/settings', { cpu: v }))),
+      row('Sync checks', 'How often everyone’s game is compared to make sure you all see the same thing. If they ever differ, you will be told. Leave this as is.',
+        seg([[15, 'Often'], [30, 'Normal'], [60, 'Rarely']], s0.hashEvery, v => host && lkPost('host/settings', { hashEvery: +v }))),
+      row('Everyone uses the host’s save', 'On: when the game starts, guests’ saves for this game are backed up and replaced by the host’s, so everyone starts identical and ends with the same progress. Turn this off only if you know the saves already match, otherwise the games will not line up.',
+        toggle(s0.shareSave !== false, v => host && lkPost('host/settings', { shareSave: v }))),
+      lk && lk.backupDir ? h('p', { class: 'lead mono' }, 'Your save was backed up to: ' + lk.backupDir) : null,
+      note('Skylanders figures are not shared between players yet.'));
   }
 
   function lkLabBody() {
@@ -197,7 +190,7 @@
       games().map(g => h('option', { value: g.titleId, selected: g.titleId === (lab.titleId || form.pickId) }, NEB.firstLine(g.name) + ' · v' + g.version)));
     const res = lab.result;
     return h('div', null,
-      note('This runs a game twice on this PC with the exact same button presses and checks that both runs match, frame by frame. It tells us whether lockstep can work for that game and, if not, roughly where it drifts. Your save is backed up and restored for you.'),
+      note('Runs a game twice on this PC with the same button presses and checks both runs match. If they do, that game should work in lockstep. Your save is backed up and put back for you. Step 1: pick a game, press Record, play for a minute, then close the game. Step 2: press Replay and just watch (do not press anything).'),
       h('div', { class: 'cp-row' }, sel),
       h('div', { class: 'cp-opts' }, h('div', null, h('span', { class: 'hint' }, 'Record for'), seg([[30, '30 s'], [60, '1 min'], [120, '2 min']], lab.seconds || 60, v => { form.labSeconds = +v; }))),
       h('div', { class: 'cp-row' },
@@ -232,13 +225,15 @@
 
   function lockstepGroup() {
     const sum = !lk ? 'Core too old' : lk.role === 'host' ? 'Hosting · ' + (lk.players || []).length + ' player' + ((lk.players || []).length === 1 ? '' : 's') : lk.role === 'guest' ? 'In a session' : 'Not in a session';
+    const play = h('div', null,
+      !lk || !lk.role ? note('Everyone runs the game on their own PC with their own graphics settings, and only button presses travel over the network. You each need NEBULATOR and your own copy of the game. 1. One person hosts and shares the code. 2. Everyone else joins with it. 3. The host picks a game and starts it.') : null,
+      lkSessionBody(),
+      lk && lk.role ? [h('h3', { class: 'cp-h3', style: 'margin-top:18px' }, 'Players & game'), lkPlayersBody()] : null);
     const body = h('div', { class: 'cp-subs' },
-      acc('lk-session', 'Session', lk && lk.role ? (KIND_LABEL[lk.role] + (lk.code ? ' · ' + lk.code : '')) : 'Host or join', lkSessionBody(), { sub: true, open: true }),
-      acc('lk-players', 'Players & game', lk && lk.titleId ? gameName(lk.titleId) : 'Who is here and what to play', lkPlayersBody(), { sub: true }),
-      acc('lk-sync', 'Sync & delay', 'Input delay, CPU mode, state checks', lkSyncBody(), { sub: true }),
-      acc('lk-save', 'Shared save', 'Start from the host’s save', lkSaveBody(), { sub: true }),
-      acc('lk-lab', 'Determinism lab', lk && lk.lab && lk.lab.result ? (lk.lab.result.identical ? 'Last test: identical' : 'Last test: drifted') : 'Test a game on this PC', lkLabBody(), { sub: true }),
-      acc('lk-diag', 'Diagnostics', lk && lk.desync ? 'Desync detected' : 'Frame counter, stalls, log', lkDiagBody(), { sub: true }));
+      acc('lk-play', 'Play together', lk && lk.role ? (lk.titleId ? gameName(lk.titleId) : 'Waiting for a game') : 'Host or join', play, { sub: true, open: true }),
+      acc('lk-adv', 'Advanced settings', 'Delay, speed, saves. Defaults are fine', lkAdvBody(), { sub: true }),
+      acc('lk-lab', 'Test a game', lk && lk.lab && lk.lab.result ? (lk.lab.result.identical ? 'Last test: works' : 'Last test: drifted') : 'Check a game is safe for lockstep', lkLabBody(), { sub: true }),
+      acc('lk-diag', 'Troubleshooting', lk && lk.desync ? 'Out of sync detected' : 'Status and log', lkDiagBody(), { sub: true }));
     return acc('grp-lock', 'Lockstep co-op', sum + ' · everyone runs the game', body, { badge: 'Experimental', open: true });
   }
 

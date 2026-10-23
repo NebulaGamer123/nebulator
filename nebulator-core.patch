@@ -5439,10 +5439,10 @@ index 0000000..067e235
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepNet.cpp b/src/gui/sdlgui/LockstepNet.cpp
 new file mode 100644
-index 0000000..128c976
+index 0000000..a7592cb
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepNet.cpp
-@@ -0,0 +1,1577 @@
+@@ -0,0 +1,1622 @@
 +// Lockstep netplay: session (TCP 17810), compatibility check, shared save, input exchange, desync report,
 +// the Determinism Lab and the /api/coop/lock/* routes. The emulation side is in LockstepCore.cpp.
 +//
@@ -5713,14 +5713,53 @@ index 0000000..128c976
 +				return true;
 +			}
 +
-+			std::string RandomCode()
++			constexpr const char* kAlpha = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
++
++			// The join code carries the host's address (4 bytes) plus a 2 byte secret, so joining needs nothing but the code.
++			std::string MakeCode(const std::string& ip)
 +			{
-+				static const char* al = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
++				boost::system::error_code ec;
++				const auto addr = asio::ip::make_address_v4(ip, ec);
++				if (ec)
++					return {};
 +				std::random_device rd;
-+				std::string c;
-+				for (int i = 0; i < 5; i++)
-+					c += al[rd() % 32];
++				uint64_t v = 0;
++				for (uint8_t b : addr.to_bytes())
++					v = (v << 8) | b;
++				v = (v << 16) | (rd() & 0xFFFF);
++				v <<= 2; // 48 bits -> 50 bits = 10 characters
++				std::string c(10, 'A');
++				for (int i = 9; i >= 0; i--)
++				{
++					c[(size_t)i] = kAlpha[v & 31];
++					v >>= 5;
++				}
 +				return c;
++			}
++
++			std::string NormalizeCode(const std::string& in)
++			{
++				std::string out;
++				for (char ch : in)
++				{
++					const char u = (char)toupper((unsigned char)ch);
++					if (strchr(kAlpha, u) && u != 0)
++						out += u;
++				}
++				return out;
++			}
++
++			bool HostFromCode(const std::string& code, std::string& ip)
++			{
++				if (code.size() != 10)
++					return false;
++				uint64_t v = 0;
++				for (char ch : code)
++					v = (v << 5) | (uint64_t)(strchr(kAlpha, ch) - kAlpha);
++				v >>= 2;
++				const uint32_t a = (uint32_t)(v >> 16);
++				ip = std::to_string(a >> 24) + "." + std::to_string((a >> 16) & 255) + "." + std::to_string((a >> 8) & 255) + "." + std::to_string(a & 255);
++				return true;
 +			}
 +
 +			std::string LocalIp()
@@ -6102,7 +6141,7 @@ index 0000000..128c976
 +					std::scoped_lock l(s.m);
 +					if (reject.empty() && (s.role != "host"))
 +						reject = "The host is not accepting players.";
-+					else if (reject.empty() && (!hello.HasMember("code") || std::string(hello["code"].GetString()) != s.code))
++					else if (reject.empty() && (!hello.HasMember("code") || NormalizeCode(hello["code"].GetString()) != s.code))
 +						reject = "Wrong join code.";
 +					else if (reject.empty() && s.state == "running")
 +						reject = "The game already started.";
@@ -6754,7 +6793,10 @@ index 0000000..128c976
 +			s.name = GetStr(d, "name", "Host");
 +			if (s.name.empty())
 +				s.name = "Host";
-+			s.code = RandomCode();
++			const std::string myIp = LocalIp();
++			s.code = myIp.empty() ? std::string() : MakeCode(myIp);
++			if (s.code.empty())
++				return Err(503, "This PC does not seem to be on a network. Connect to Wi-Fi or Ethernet and try again.");
 +			s.role = "host";
 +			s.state = "idle";
 +			s.slot = 0;
@@ -6799,7 +6841,10 @@ index 0000000..128c976
 +		}
 +		if (sub == "/join")
 +		{
-+			const std::string host = GetStr(d, "host"), code = GetStr(d, "code"), name = GetStr(d, "name", "Guest");
++			const std::string code = NormalizeCode(GetStr(d, "code")), name = GetStr(d, "name", "Guest");
++			std::string host = GetStr(d, "host"); // optional override (advanced)
++			if (host.empty() && !HostFromCode(code, host))
++				return Err(400, "That code does not look right. It has 10 letters and numbers.");
 +			{
 +				std::scoped_lock l(s.m);
 +				if (!s.role.empty())

@@ -314,3 +314,10 @@ body.coop-view { overflow: hidden; }
 .cp-result { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; padding: 10px 12px; border-left: 3px solid var(--line); background: var(--bg); font: 500 13px/1.4 var(--mono); }
 .cp-result.ok { border-color: #52d08a; }
 .cp-result.bad { border-color: #ef6a6a; }
+
+.cp-gap { display: inline-block; width: 14px; }
+.cp-set { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.cp-set-h { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.cp-set-h b { font: 600 12px/1.2 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+.cp-set .lead { margin: 6px 0 0; }
+.linkbtn { display: block; margin-top: 10px; color: var(--mute); font: 500 12px var(--mono); text-decoration: underline; }
