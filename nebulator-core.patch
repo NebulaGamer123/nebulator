@@ -4983,10 +4983,10 @@ index 0000000..89c6e8d
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepCore.cpp b/src/gui/sdlgui/LockstepCore.cpp
 new file mode 100644
-index 0000000..7a4b4bf
+index 0000000..067e235
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepCore.cpp
-@@ -0,0 +1,451 @@
+@@ -0,0 +1,450 @@
 +// Lockstep engine, CPU/GPU/IOSU side. See Lockstep.h for the overall idea.
 +#include "Lockstep.h"
 +#include "CoopRemote.h"
@@ -5423,7 +5423,6 @@ index 0000000..7a4b4bf
 +		g_started = false;
 +	}
 +
-+	void Init(const std::string&) {}
 +
 +	std::string FirstDifferentRegion(const std::string& a, const std::string& b)
 +	{
