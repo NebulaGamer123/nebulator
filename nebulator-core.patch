@@ -65,10 +65,10 @@ index 644032c..539ee5b 100644
  	if (NOT ENABLE_VCPKG)
  	    find_package(cubeb)
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index d8378c3..aab352c 100644
+index d8378c3..fe1a72c 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -67,6 +67,16 @@ add_subdirectory(resource)
+@@ -67,6 +67,18 @@ add_subdirectory(resource)
  add_executable(CemuBin
  	main.cpp
  	mainLLE.cpp
@@ -76,6 +76,8 @@ index d8378c3..aab352c 100644
 +	gui/sdlgui/LinuxLtoShim.cpp
 +	gui/sdlgui/ControlUpdate.cpp
 +	gui/sdlgui/ControlCoop.cpp
++	gui/sdlgui/LockstepCore.cpp
++	gui/sdlgui/LockstepNet.cpp
 +	gui/sdlgui/JpegEnc.cpp
 +	gui/sdlgui/HttpServer.cpp
 +	gui/sdlgui/ControlApi.cpp
@@ -85,7 +87,7 @@ index d8378c3..aab352c 100644
  )
  
  cemu_use_precompiled_header(CemuBin)
-@@ -94,7 +104,7 @@ string(TIMESTAMP CURRENT_YEAR "%Y" UTC)
+@@ -94,7 +106,7 @@ string(TIMESTAMP CURRENT_YEAR "%Y" UTC)
  
  set_property(TARGET CemuBin PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
  set_property(TARGET CemuBin PROPERTY WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>)
@@ -94,7 +96,7 @@ index d8378c3..aab352c 100644
  
  if (MACOS_BUNDLE)
  	set_property(TARGET CemuBin PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resource/MacOSXBundleInfo.plist.in")
-@@ -215,6 +225,8 @@ target_link_libraries(CemuBin PRIVATE
+@@ -215,6 +227,8 @@ target_link_libraries(CemuBin PRIVATE
  	CemuGui
  	CemuInput
  	CemuUtil
@@ -103,7 +105,7 @@ index d8378c3..aab352c 100644
  )
  
  if(UNIX AND NOT APPLE)
-@@ -229,3 +241,13 @@ endif()
+@@ -229,3 +243,13 @@ endif()
  if (BSD)
  	target_link_libraries(CemuBin PRIVATE execinfo SPIRV-Tools SPIRV-Tools-opt)
  endif()
@@ -117,6 +119,96 @@ index d8378c3..aab352c 100644
 +
 +# the removed wx GUI used to link CemuResource (default font data, extractCafeDefaultFont); every platform needs it
 +target_link_libraries(CemuBin PRIVATE CemuResource)
+diff --git a/src/Cafe/CafeSystem.cpp b/src/Cafe/CafeSystem.cpp
+index 6e6504a..acfd66b 100644
+--- a/src/Cafe/CafeSystem.cpp
++++ b/src/Cafe/CafeSystem.cpp
+@@ -1,4 +1,5 @@
+ #include "Cafe/OS/common/OSCommon.h"
++#include "gui/sdlgui/Lockstep.h"
+ #include "WindowSystem.h"
+ #include "Cafe/OS/libs/gx2/GX2.h"
+ #include "Cafe/GameProfile/GameProfile.h"
+@@ -369,9 +370,11 @@ void cemu_initForGame()
+ 	// input manager apply game profile
+ 	InputManager::instance().apply_game_profile();
+ 	// determine cycle offset since 1.1.2000
+-	uint64 secondsSince2000_UTC = (uint64)(time(NULL) - 946684800);
++	const uint64 nowUnix = Lockstep::Active() ? Lockstep::AgreedUnixTime() : (uint64)time(NULL);
++	uint64 secondsSince2000_UTC = (uint64)(nowUnix - 946684800);
+ 	ppcCyclesSince2000_UTC = secondsSince2000_UTC * (uint64)ESPRESSO_CORE_CLOCK;
+-	time_t theTime = (time(NULL) - 946684800);
++	time_t theTime = (nowUnix - 946684800);
++	if (!Lockstep::Active())
+ 	{
+ 		tm* lt = localtime(&theTime);
+ #if BOOST_OS_WINDOWS
+@@ -909,7 +912,7 @@ namespace CafeSystem
+ 			module->TitleStart();
+ 		cemu_initForGame();
+ 		// enter scheduler
+-		if ((ActiveSettings::GetCPUMode() == CPUMode::MulticoreRecompiler || LaunchSettings::ForceMultiCoreInterpreter()) && !LaunchSettings::ForceInterpreter())
++		if (!Lockstep::Active() && (ActiveSettings::GetCPUMode() == CPUMode::MulticoreRecompiler || LaunchSettings::ForceMultiCoreInterpreter()) && !LaunchSettings::ForceInterpreter())
+ 			coreinit::OSSchedulerBegin(3);
+ 		else
+ 			coreinit::OSSchedulerBegin(1);
+diff --git a/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterMain.cpp b/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterMain.cpp
+index 4449f13..2aec1b4 100644
+--- a/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterMain.cpp
++++ b/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterMain.cpp
+@@ -1,4 +1,5 @@
+ #include "PPCInterpreterInternal.h"
++#include "gui/sdlgui/Lockstep.h"
+ #include "Cafe/OS/RPL/rpl.h"
+ #include "Cafe/GameProfile/GameProfile.h"
+ #include "Cafe/HW/Espresso/Debugger/Debugger.h"
+@@ -40,6 +41,8 @@ TLS_WORKAROUND_NOINLINE void PPCInterpreter_setCurrentInstance(PPCInterpreter_t*
+ 
+ uint64 PPCInterpreter_getMainCoreCycleCounter()
+ {
++	if (Lockstep::Active())
++		return Lockstep::VirtualCycles();
+ 	return PPCTimer_getFromRDTSC();
+ }
+ 
+diff --git a/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp b/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
+index 6be50ec..edeb414 100644
+--- a/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
++++ b/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
+@@ -1,4 +1,5 @@
+ #include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
++#include "gui/sdlgui/Lockstep.h"
+ #include "PPCFunctionBoundaryTracker.h"
+ #include "PPCRecompiler.h"
+ #include "PPCRecompilerIml.h"
+@@ -59,16 +60,15 @@ void ATTR_MS_ABI (*PPCRecompiler_leaveRecompilerCode_unvisited)();
+ 
+ PPCRecompilerInstanceData_t* ppcRecompilerInstanceData;
+ 
+-#if PPCREC_FORCE_SYNCHRONOUS_COMPILATION
+ static std::mutex s_singleRecompilationMutex;
+-#endif
+ 
+ void PPCRecompiler_recompileAtAddress(uint32 address);
+ 
+ // this function does never block and can fail if the recompiler lock cannot be acquired immediately
+ void PPCRecompiler_visitAddressNoBlock(uint32 enterAddress)
+ {
+-#if PPCREC_FORCE_SYNCHRONOUS_COMPILATION
++	if (PPCREC_FORCE_SYNCHRONOUS_COMPILATION || Lockstep::Active())
++	{
+ 	if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] != PPCRecompiler_leaveRecompilerCode_unvisited)
+ 		return;
+ 	s_ppcRecompilerState.recompilerSpinlock.lock();
+@@ -86,7 +86,7 @@ void PPCRecompiler_visitAddressNoBlock(uint32 enterAddress)
+ 	}
+ 	s_singleRecompilationMutex.unlock();
+ 	return;
+-#endif
++	}
+ 	// quick read-only check without lock
+ 	if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] != PPCRecompiler_leaveRecompilerCode_unvisited)
+ 		return;
 diff --git a/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp b/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp
 index f1556f8..2a4bd5b 100644
 --- a/src/Cafe/HW/Latte/Core/LatteRenderTarget.cpp
@@ -129,6 +221,37 @@ index f1556f8..2a4bd5b 100644
  	if (!g_renderer->ImguiBegin(!isPadView))
  		return;
  	swkbd_render(!isPadView);
+diff --git a/src/Cafe/HW/Latte/Core/LatteTiming.cpp b/src/Cafe/HW/Latte/Core/LatteTiming.cpp
+index 60f4c52..4aaab53 100644
+--- a/src/Cafe/HW/Latte/Core/LatteTiming.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteTiming.cpp
+@@ -1,4 +1,5 @@
+ #include "Cafe/HW/Latte/Core/Latte.h"
++#include "gui/sdlgui/Lockstep.h"
+ #include "Cafe/OS/libs/gx2/GX2_Event.h"
+ #ifdef ENABLE_VULKAN
+ #include "Cafe/HW/Latte/Renderer/Vulkan/VsyncDriver.h"
+@@ -129,6 +130,8 @@ HRTick s_lastHostVsync = 0;
+ // notify when host vsync event is triggered (on renderer canvas)
+ void LatteTiming_NotifyHostVSync()
+ {
++	if (Lockstep::Active())
++		return; // lockstep raises vsync itself, at the tick
+ 	if (!LatteTiming_IsUsingHostDrivenVSync())
+ 		return;
+ 	auto nowTimePoint = HighResolutionTimer::now().getTick();
+@@ -155,6 +158,11 @@ void LatteTiming_NotifyHostVSync()
+ // handle timed vsync event
+ void LatteTiming_HandleTimedVsync()
+ {
++	if (Lockstep::Active())
++	{
++		Lockstep::GpuPoll();
++		return;
++	}
+ 	// simulate VSync
+ 	uint64 currentTimer = HighResolutionTimer::now().getTick();
+ 	if( currentTimer >= LatteGPUState.timer_nextVSync )
 diff --git a/src/Cafe/HW/Latte/Renderer/Renderer.h b/src/Cafe/HW/Latte/Renderer/Renderer.h
 index fa77fd9..a3c3709 100644
 --- a/src/Cafe/HW/Latte/Renderer/Renderer.h
@@ -317,6 +440,115 @@ index d975e11..d547ac5 100644
  
  	void QueryMemoryInfo();
  	void QueryAvailableFormats();
+diff --git a/src/Cafe/IOSU/kernel/iosu_kernel.cpp b/src/Cafe/IOSU/kernel/iosu_kernel.cpp
+index 3ea6d7d..db76655 100644
+--- a/src/Cafe/IOSU/kernel/iosu_kernel.cpp
++++ b/src/Cafe/IOSU/kernel/iosu_kernel.cpp
+@@ -1,4 +1,5 @@
+ #include "iosu_kernel.h"
++#include "gui/sdlgui/Lockstep.h"
+ #include "util/helpers/fspinlock.h"
+ #include "util/helpers/helpers.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_IPC.h"
+@@ -586,6 +587,11 @@ namespace iosu
+ 			std::unique_lock _l(sMtxReply[(uint32)dispatchCmd->ppcCoreIndex]);
+ 			cemu_assert(dispatchCmd >= sIPCDispatchableCommandPool.GetPtr() && dispatchCmd < sIPCDispatchableCommandPool.GetPtr() + sIPCDispatchableCommandPool.GetCount());	
+ 			dispatchCmd->originalBody->result = result;
++			if (Lockstep::Active() && Lockstep::IpcReplyDeferred((uint32)dispatchCmd->ppcCoreIndex, dispatchCmd->originalBody))
++			{
++				_IPCReleaseDispatchableCommand(dispatchCmd);
++				return;
++			}
+ 			// submit to COS
+ 			IPCCommandBody* responseArray[1];
+ 			responseArray[0] = dispatchCmd->originalBody;
+@@ -672,6 +678,8 @@ namespace iosu
+ 		// called by COS directly
+ 		void IPCSubmitFromCOS(uint32 ppcCoreIndex, IPCCommandBody* cmd)
+ 		{
++			if (Lockstep::Active())
++				Lockstep::IpcSubmitted(cmd);
+ 			// create a copy of the cmd
+ 			IOSDispatchableCommand* dispatchCmd = _IPCAllocateDispatchableCommand();
+ 			dispatchCmd->body = *cmd;
+diff --git a/src/Cafe/OS/libs/TCL/TCL.cpp b/src/Cafe/OS/libs/TCL/TCL.cpp
+index b697cec..5e8aba6 100644
+--- a/src/Cafe/OS/libs/TCL/TCL.cpp
++++ b/src/Cafe/OS/libs/TCL/TCL.cpp
+@@ -1,4 +1,5 @@
+ #include "Cafe/OS/common/OSCommon.h"
++#include "gui/sdlgui/Lockstep.h"
+ #include "Cafe/OS/libs/TCL/TCL.h"
+ 
+ #include "HW/Latte/Core/LattePM4.h"
+@@ -76,11 +77,18 @@ namespace TCL
+ 		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::acquire);
+ 		if (readIndex == writeIndex)
+ 			return false;
++		if (Lockstep::Active() && readIndex == Lockstep::GpuLimit())
++			return false; // lockstep: the GPU only runs up to the snapshot taken at the last tick
+ 		cmdWord = tclRingBufferA[readIndex].load(std::memory_order::relaxed);
+ 		tclRingBufferA_readIndex.store((readIndex + 1) % TCL_RING_BUFFER_SIZE, std::memory_order::release);
+ 		return true;
+ 	}
+ 
++	uint32 TCLGetRingWriteIndex()
++	{
++		return tclRingBufferA_writeIndex.load(std::memory_order::acquire);
++	}
++
+ 	void TCLWaitForRBSpace(uint32be numU32s)
+ 	{
+ 		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::relaxed);
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
+index 9fe4bea..51cf484 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
+@@ -1,4 +1,5 @@
+ #include "Cafe/OS/common/OSCommon.h"
++#include "gui/sdlgui/Lockstep.h"
+ #include "Cafe/HW/Espresso/PPCCallback.h"
+ #include "Cafe/OS/RPL/rpl.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
+@@ -1144,6 +1145,7 @@ namespace coreinit
+ 
+ 		thread->requestFlags = (OSThread_t::REQUEST_FLAG_BIT)(thread->requestFlags & OSThread_t::REQUEST_FLAG_CANCEL); // remove all flags except cancel flag
+ 
++		Lockstep::SliceEnd(hCPU->remainingCycles);
+ 		// update total cycles
+ 		sint64 executedCycles = (sint64)thread->quantumTicks - (sint64)hCPU->remainingCycles;
+ 		executedCycles = std::max<sint64>(executedCycles, 0);
+@@ -1190,6 +1192,8 @@ namespace coreinit
+ 			s_lehmer_lcg[coreIndex] = 12345;
+ 		hCPU->remainingCycles += (s_lehmer_lcg[coreIndex] & 0x7F);
+ 		s_lehmer_lcg[coreIndex] = (uint32)((uint64)s_lehmer_lcg[coreIndex] * 279470273ull % 0xfffffffbull);
++		if (Lockstep::Active())
++			Lockstep::SliceBegin(hCPU->remainingCycles);
+ 	}
+ 
+ 	OSThread_t* __OSGetNextRunableThread(uint32 coreIndex)
+@@ -1233,6 +1237,8 @@ namespace coreinit
+ 
+ 	void __OSCheckSystemEvents()
+ 	{
++		if (Lockstep::Active())
++			Lockstep::OnSystemEvents();
+ 		// AX update
+ 		snd_core::AXOut_update();
+ 		// alarm update
+@@ -1261,8 +1267,12 @@ namespace coreinit
+ 					cemu_assert_debug(nextThread->state == OSThread_t::THREAD_STATE::STATE_RUNNING);
+ 					__OSSwitchToThreadFiber(nextThread, coreIndex);
+ 				}
++				else if (Lockstep::Active())
++					Lockstep::IdleStep();
+ 				__OSUnlockScheduler();
+ 			}
++			else if (Lockstep::Active())
++				Lockstep::IdleStep();
+ 			if (isMainCore)
+ 			{
+ 				__OSCheckSystemEvents();
 diff --git a/src/Cafe/OS/libs/nsyshid/Skylander.cpp b/src/Cafe/OS/libs/nsyshid/Skylander.cpp
 index 7833796..0970f0c 100644
 --- a/src/Cafe/OS/libs/nsyshid/Skylander.cpp
@@ -334,10 +566,12 @@ index 7833796..0970f0c 100644
  } // namespace nsyshid
 \ No newline at end of file
 diff --git a/src/Cafe/OS/libs/snd_core/ax_out.cpp b/src/Cafe/OS/libs/snd_core/ax_out.cpp
-index 6cb1599..dfdb34f 100644
+index 6cb1599..9eac773 100644
 --- a/src/Cafe/OS/libs/snd_core/ax_out.cpp
 +++ b/src/Cafe/OS/libs/snd_core/ax_out.cpp
-@@ -2,6 +2,7 @@
+@@ -1,7 +1,9 @@
+ #include "Cafe/OS/libs/snd_core/ax.h"
++#include "gui/sdlgui/Lockstep.h"
  #include "Cafe/OS/libs/snd_core/ax_internal.h"
  #include "Cafe/HW/MMU/MMU.h"
  #include "audio/IAudioAPI.h"
@@ -345,7 +579,7 @@ index 6cb1599..dfdb34f 100644
  //#include "ax.h"
  #include "config/CemuConfig.h"
  
-@@ -186,6 +187,19 @@ namespace snd_core
+@@ -186,6 +188,19 @@ namespace snd_core
  			if(g_tvAudio)
  				g_tvAudio->FeedBlock(tempTVChannelData);
  
@@ -365,6 +599,45 @@ index 6cb1599..dfdb34f 100644
  			tempAudioBlockCounter = 0;
  		}
  	}
+@@ -482,6 +497,19 @@ namespace snd_core
+ 		constexpr static auto kWaitDurationFast = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::microseconds(2900));
+ 		constexpr static auto kWaitDurationMinimum = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::microseconds(1700));
+ 
++		if (Lockstep::Active())
++		{
++			static uint64 s_nextAx = 0;
++			if (!Lockstep::UseAudioClock(s_nextAx))
++				return;
++			if (snd_core::isInitialized() && numQueuedFramesSndGeneric == snd_core::getNumProcessedFrames())
++			{
++				AXOut_updateDevicePlayState(true);
++				snd_core::AXIst_QueueFrame();
++				numQueuedFramesSndGeneric++;
++			}
++			return;
++		}
+ 		// if we haven't buffered any blocks, we will wait less time than usual
+ 		bool additional_blocks_required = false;
+ 		{
+diff --git a/src/config/ActiveSettings.cpp b/src/config/ActiveSettings.cpp
+index 08def5a..195e5df 100644
+--- a/src/config/ActiveSettings.cpp
++++ b/src/config/ActiveSettings.cpp
+@@ -1,4 +1,5 @@
+ #include "Cafe/GameProfile/GameProfile.h"
++#include "gui/sdlgui/Lockstep.h"
+ #include "Cafe/IOSU/legacy/iosu_crypto.h"
+ #include "Cafe/HW/Latte/Core/Latte.h"
+ #ifdef ENABLE_VULKAN
+@@ -66,6 +67,8 @@ bool ActiveSettings::DisplayDRCEnabled()
+ 
+ CPUMode ActiveSettings::GetCPUMode()
+ {
++	if (Lockstep::Active())
++		return Lockstep::InterpreterOnly() ? CPUMode::SinglecoreInterpreter : CPUMode::SinglecoreRecompiler;
+ 	auto mode = g_current_game_profile->GetCPUMode().value_or(CPUMode::Auto);
+ 
+ 	if (mode == CPUMode::Auto)
 diff --git a/src/gui/CMakeLists.txt b/src/gui/CMakeLists.txt
 index d66e971..593c886 100644
 --- a/src/gui/CMakeLists.txt
@@ -381,10 +654,10 @@ index d66e971..593c886 100644
 -endif()
 diff --git a/src/gui/sdlgui/ControlApi.cpp b/src/gui/sdlgui/ControlApi.cpp
 new file mode 100644
-index 0000000..b9b7cbd
+index 0000000..e8c2a45
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.cpp
-@@ -0,0 +1,665 @@
+@@ -0,0 +1,689 @@
 +#include "ControlApi.h"
 +
 +#include "config/ActiveSettings.h"
@@ -842,6 +1115,30 @@ index 0000000..b9b7cbd
 +		}
 +	} // namespace
 +
++	bool LaunchTitle(const std::string& titleIdHex, std::string& err)
++	{
++		if (GetState() != State::Ui)
++		{
++			err = "a game is already running";
++			return false;
++		}
++		std::string path;
++		try
++		{
++			TitleId id = std::stoull(titleIdHex, nullptr, 16);
++			GameInfo2 gi = CafeTitleList::GetGameInfo(id);
++			if (gi.IsValid())
++				path = _pathToUtf8(gi.GetBase().GetPath());
++		}
++		catch (...) {}
++		if (path.empty())
++		{
++			err = "this game was not found on this PC";
++			return false;
++		}
++		return g_cb.launch && g_cb.launch(path, false, err);
++	}
++
 +	// ====================================================================== helpers
 +	std::string SanitizeUtf8(const std::string& s)
 +	{
@@ -1052,10 +1349,10 @@ index 0000000..b9b7cbd
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlApi.h b/src/gui/sdlgui/ControlApi.h
 new file mode 100644
-index 0000000..4de572c
+index 0000000..75a440c
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.h
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,84 @@
 +#pragma once
 +// JSON API + static file server behind the NEBULATOR UI.
 +
@@ -1131,6 +1428,8 @@ index 0000000..4de572c
 +	HttpResponse HandleGfx(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleUpdate(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleCoop(const HttpRequest& req, const std::string& sub);
++	HttpResponse HandleLock(const HttpRequest& req, const std::string& sub); // coop/lock/*
++	bool LaunchTitle(const std::string& titleIdHex, std::string& err);
 +	std::string CurrentTitle();
 +	std::string AppVersion(); // from version.txt next to the exe ("dev" when missing)
 +	void RequestQuit(bool appQuit);
@@ -1140,10 +1439,10 @@ index 0000000..4de572c
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlCoop.cpp b/src/gui/sdlgui/ControlCoop.cpp
 new file mode 100644
-index 0000000..ca3de27
+index 0000000..26986d0
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlCoop.cpp
-@@ -0,0 +1,1193 @@
+@@ -0,0 +1,1195 @@
 +// LAN co-op. One person hosts (the game runs on their PC), friends on the same Wi-Fi press Join in their own
 +// NEBULATOR and type the host's code. The host streams picture and sound to each guest; the guests' buttons arrive as
 +// extra controllers (players 2-4) on the host, so the game just sees more people on the same console.
@@ -2218,6 +2517,8 @@ index 0000000..ca3de27
 +	HttpResponse HandleCoop(const HttpRequest& req, const std::string& sub)
 +	{
 +		const bool post = req.method == "POST";
++		if (sub.rfind("/lock", 0) == 0)
++			return HandleLock(req, sub.substr(5));
 +		if (sub.empty() || sub == "/status")
 +			return Status();
 +		if (sub == "/stream")
@@ -4592,6 +4893,2134 @@ index 0000000..7f6a410
 +std::unordered_map<unsigned int, bool> g_nebulatorKeepMap;
 +bool NebulatorKeepMapIdx(unsigned int k) { return g_nebulatorKeepMap[k]; }
 +#endif
+diff --git a/src/gui/sdlgui/Lockstep.h b/src/gui/sdlgui/Lockstep.h
+new file mode 100644
+index 0000000..89c6e8d
+--- /dev/null
++++ b/src/gui/sdlgui/Lockstep.h
+@@ -0,0 +1,82 @@
++#pragma once
++// Lockstep netplay engine (experimental).
++// Every player runs the game locally; only controller inputs are exchanged. For that to work the emulation must behave
++// identically on every PC, so while a lockstep session is active:
++//  - emulated time comes from executed cycles (virtual clock), never from the host clock
++//  - the CPU runs single-core with synchronous recompilation
++//  - the GPU thread only runs inside a short window at every 1/60 s tick, while the CPU is parked
++//  - IOSU replies are collected and delivered at the tick in a fixed order
++//  - vsync, audio frames and the RTC come from the virtual clock / the session
++#include <atomic>
++#include <cstdint>
++#include <string>
++
++namespace Lockstep
++{
++	extern std::atomic<bool> g_active;
++	inline bool Active() { return g_active.load(std::memory_order_relaxed); }
++
++	struct PadState
++	{
++		uint32_t buttons = 0; // bit i = Pro Controller button id (i + 1)
++		int8_t lx = 0, ly = 0, rx = 0, ry = 0; // up = negative y
++		bool operator==(const PadState& o) const { return buttons == o.buttons && lx == o.lx && ly == o.ly && rx == o.rx && ry == o.ry; }
++	};
++
++	constexpr int kMaxPlayers = 4;
++	constexpr int kTicksPerSecondNum = 60000, kTicksPerSecondDen = 1001; // 59.94 Hz
++
++	// ---- virtual clock (CPU side) ----
++	uint64_t VirtualCycles();
++	void SliceBegin(int32_t startRemaining); // a PPC thread got a timeslice
++	void SliceEnd(int32_t remainingNow); // the timeslice ended
++	void IdleStep(); // nothing runnable: let time pass
++	void OnSystemEvents(); // main core idle loop, scheduler lock NOT held: runs the per-tick protocol
++	bool UseAudioClock(uint64_t& nextAxCycles); // AX: true when a 3 ms virtual interval elapsed
++
++	// ---- GPU gate ----
++	uint32_t GpuLimit(); // ring index the GPU may read up to
++	void GpuPoll(); // GPU thread: called from every wait/idle loop iteration; parks until the next window
++
++	// ---- IOSU replies ----
++	void IpcSubmitted(void* originalBody);
++	bool IpcReplyDeferred(uint32_t coreIndex, void* originalBody); // true = Lockstep took the reply and will deliver it
++
++	// ---- misc ----
++	uint64_t AgreedUnixTime(); // seconds, identical on every PC of the session
++	bool InterpreterOnly();
++	void SessionStarting(); // called right before the game is launched
++	void GameStopped(); // called when the game window closes
++	void Init(const std::string& dataDir);
++	void SetAgreedUnixTime(uint64_t seconds);
++	void SetInterpreterOnly(bool v);
++
++	// ---- net -> core interface (implemented by the core, called by LockstepNet) ----
++	struct HashReport
++	{
++		uint32_t tick = 0;
++		uint64_t total = 0;
++		std::string chunks; // 4 bytes per 1 MiB of MEM2
++	};
++	std::string FirstDifferentRegion(const std::string& a, const std::string& b);
++
++	// ---- core -> net interface (implemented by LockstepNet) ----
++	namespace Net
++	{
++		enum class Mode { Off, Session, LabRecord, LabReplay };
++		Mode GetMode();
++		int LocalSlot();
++		int PlayerCount();
++		int InputDelay();
++		int HashEvery();
++		void SendInput(uint32_t tick, const PadState& p);
++		// blocks (up to a long timeout) until inputs of all players for this tick are present; false = session is gone
++		bool WaitInputs(uint32_t tick, PadState out[kMaxPlayers], int64_t& waitedMs);
++		void SendHash(const HashReport& r);
++		void LabInput(uint32_t tick, PadState& slot0, bool record); // record: stores slot0, replay: fills it
++		void LabHash(const HashReport& r);
++		void Log(const std::string& s);
++		void Stats(uint32_t tick, uint32_t stalls, uint32_t impure, const std::string& waitingFor);
++		uint32_t PingMs();
++	} // namespace Net
++} // namespace Lockstep
+diff --git a/src/gui/sdlgui/LockstepCore.cpp b/src/gui/sdlgui/LockstepCore.cpp
+new file mode 100644
+index 0000000..7a4b4bf
+--- /dev/null
++++ b/src/gui/sdlgui/LockstepCore.cpp
+@@ -0,0 +1,451 @@
++// Lockstep engine, CPU/GPU/IOSU side. See Lockstep.h for the overall idea.
++#include "Lockstep.h"
++#include "CoopRemote.h"
++
++#include "Cafe/OS/common/OSCommon.h"
++#include "Cafe/HW/Espresso/PPCState.h"
++#include "Cafe/HW/Espresso/Const.h"
++#include "Cafe/HW/MMU/MMU.h"
++#include "Cafe/HW/Latte/Core/Latte.h"
++#include "Cafe/OS/libs/coreinit/coreinit_IPC.h"
++#include "input/InputManager.h"
++#include "input/emulated/ProController.h"
++#include "input/emulated/VPADController.h"
++
++#include <chrono>
++#include <condition_variable>
++#include <map>
++#include <mutex>
++#include <thread>
++#include <unordered_map>
++
++void LatteTiming_signalVsync();
++namespace TCL
++{
++	uint32 TCLGetRingWriteIndex();
++}
++
++namespace Lockstep
++{
++	std::atomic<bool> g_active{false};
++
++	namespace
++	{
++		using Clock = std::chrono::steady_clock;
++		constexpr uint64_t kCoreClock = Espresso::CORE_CLOCK;
++		// one tick = one vsync = 1001/60000 s of virtual time
++		constexpr uint64_t kTickCycles = kCoreClock * 1001ull / 60000ull;
++		constexpr uint64_t kIdleStep = kCoreClock / 10000ull; // 0.1 ms
++		constexpr uint64_t kCpuShare = 3; // three emulated cores take turns on one host thread
++
++		// ---------------------------------------------------------------- virtual clock
++		std::atomic<uint64_t> g_cycNum{0}; // executed core cycles of all slices (undivided)
++		int32_t g_sliceStart = 0;
++		bool g_inSlice = false;
++		std::atomic<uint64_t> g_unixTime{0};
++		std::atomic<bool> g_interpOnly{false};
++
++		// ---------------------------------------------------------------- tick state (PPC main thread only)
++		bool g_started = false;
++		uint32_t g_tick = 0;
++		uint64_t g_nextTickV = 0;
++		Clock::time_point g_deadline;
++		uint32_t g_stalls = 0, g_impure = 0;
++		std::shared_ptr<EmulatedController> g_local;
++		std::shared_ptr<CoopRemote> g_pads[kMaxPlayers];
++
++		// ---------------------------------------------------------------- GPU gate
++		std::atomic<uint32_t> g_epoch{0};
++		std::atomic<uint32_t> g_gpuLimit{0};
++		std::atomic<uint32_t> g_gpuSeen{0xFFFFFFFFu};
++		std::atomic<bool> g_gpuAlive{false};
++		uint32_t g_gpuPrev = 0; // GPU thread only
++
++		// ---------------------------------------------------------------- IOSU replies
++		struct IpcEntry
++		{
++			Clock::time_point submitted;
++			bool done = false, exempt = false;
++			uint32_t core = 0;
++			void* body = nullptr;
++		};
++		std::mutex g_ipcM;
++		std::condition_variable g_ipcCv;
++		std::map<uint64_t, IpcEntry> g_ipc;
++		std::unordered_map<void*, uint64_t> g_ipcByBody;
++		uint64_t g_ipcSeq = 0;
++
++		inline uint64_t Mix(uint64_t h, uint64_t w)
++		{
++			h ^= w;
++			h *= 0x9E3779B97F4A7C15ull;
++			return h ^ (h >> 32);
++		}
++
++		// ---------------------------------------------------------------- local input
++		PadState Sample()
++		{
++			PadState p;
++			if (!g_local)
++				return p;
++			g_local->controllers_update_states();
++			const bool vpad = g_local->type() == EmulatedController::VPAD;
++			const int maxId = vpad ? 16 : 17;
++			for (int id = 1; id <= maxId; id++)
++			{
++				if (!g_local->is_mapping_down((uint64)id))
++					continue;
++				int proId = id;
++				if (vpad && id >= 11) // VPAD: Up Down Left Right sit one id earlier than on the Pro controller (Home comes between)
++					proId = id + 1;
++				p.buttons |= 1u << (proId - 1);
++			}
++			if (vpad && g_local->is_mapping_down((uint64)VPADController::kButtonId_Home))
++				p.buttons |= 1u << (ProController::kButtonId_Home - 1);
++			auto conv = [](float v) -> int8_t {
++				v = std::max(-1.0f, std::min(1.0f, v));
++				return (int8_t)std::lround(v * 127.0f);
++			};
++			const glm::vec2 a = g_local->get_axis(), r = g_local->get_rotation();
++			p.lx = conv(a.x);
++			p.ly = conv(-a.y);
++			p.rx = conv(r.x);
++			p.ry = conv(-r.y);
++			return p;
++		}
++
++		void AttachPads()
++		{
++			auto& im = InputManager::instance();
++			g_local = im.get_controller(0); // the player's own bindings (kept alive here even after the slot is replaced)
++			const int n = std::max(1, Net::PlayerCount());
++			for (int i = 0; i < n && i < kMaxPlayers; i++)
++			{
++				auto emu = im.set_controller((size_t)i, EmulatedController::Type::Pro);
++				if (!emu)
++					continue;
++				emu->clear_controllers();
++				emu->clear_mappings();
++				g_pads[i] = std::make_shared<CoopRemote>("lockstep-" + std::to_string(i), "Lockstep player " + std::to_string(i + 1));
++				emu->add_controller(g_pads[i]);
++				CoopRemote::ApplyMapping(emu, g_pads[i]);
++			}
++			if (!g_local)
++				Net::Log("No controller is bound to Player 1, so this PC cannot send any input. Bind one in the Controls tab.");
++		}
++
++		// ---------------------------------------------------------------- IOSU barrier
++		void DeliverIpc()
++		{
++			std::vector<std::pair<uint32_t, void*>> out;
++			{
++				std::unique_lock l(g_ipcM);
++				for (;;)
++				{
++					bool pending = false;
++					const auto now = Clock::now();
++					for (auto& [seq, e] : g_ipc)
++					{
++						if (e.done || e.exempt)
++							continue;
++						if (now - e.submitted > std::chrono::milliseconds(60))
++						{
++							e.exempt = true; // a request that waits for something outside our control (polling a device)
++							g_impure++;
++						}
++						else
++							pending = true;
++					}
++					if (!pending)
++						break;
++					g_ipcCv.wait_for(l, std::chrono::milliseconds(2));
++				}
++				for (auto it = g_ipc.begin(); it != g_ipc.end();)
++				{
++					if (it->second.done)
++					{
++						out.emplace_back(it->second.core, it->second.body);
++						g_ipcByBody.erase(it->second.body);
++						it = g_ipc.erase(it);
++					}
++					else
++						++it;
++				}
++			}
++			for (auto& [core, body] : out)
++			{
++				IPCCommandBody* arr[1] = {(IPCCommandBody*)body};
++				coreinit::IPCDriver_NotifyResponses(core, arr, 1);
++			}
++		}
++
++		// ---------------------------------------------------------------- GPU window
++		void GpuWindow()
++		{
++			const bool expectGpu = LatteGPUState.gx2InitCalled != 0;
++			if (!expectGpu)
++				return;
++			g_gpuLimit.store(TCL::TCLGetRingWriteIndex(), std::memory_order_release);
++			const uint32_t e = g_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
++			const auto start = Clock::now();
++			while (g_gpuSeen.load(std::memory_order_acquire) != e)
++			{
++				if (Clock::now() - start > std::chrono::seconds(g_gpuAlive.load() ? 20 : 15))
++				{
++					g_impure++;
++					Net::Log("The graphics thread did not finish a frame in time (tick " + std::to_string(g_tick) + ")");
++					break;
++				}
++				std::this_thread::sleep_for(std::chrono::microseconds(15));
++			}
++		}
++
++		// ---------------------------------------------------------------- state fingerprint
++		HashReport ComputeHash(uint32_t tick)
++		{
++			HashReport r;
++			r.tick = tick;
++			const uint32_t base = mmuRange_MEM2.getBase();
++			const uint32_t size = mmuRange_MEM2.size;
++			const uint32_t chunks = size >> 20;
++			const uint32_t phase = (tick / (uint32_t)std::max(1, Net::HashEvery())) % 16;
++			const uint8_t* mem = memory_getPointerFromVirtualOffset(base);
++			r.chunks.resize((size_t)chunks * 4);
++			uint64_t total = Mix(0x1234567ull, VirtualCycles());
++			for (uint32_t c = 0; c < chunks; c++)
++			{
++				uint64_t h = 0xCBF29CE484222325ull + c;
++				for (uint32_t pg = phase; pg < 256; pg += 16)
++				{
++					const uint64_t* w = (const uint64_t*)(mem + ((size_t)c << 20) + (size_t)pg * 4096);
++					for (int i = 0; i < 512; i++)
++						h = Mix(h, w[i]);
++				}
++				const uint32_t h32 = (uint32_t)(h ^ (h >> 32));
++				memcpy(&r.chunks[(size_t)c * 4], &h32, 4);
++				total = Mix(total, h32);
++			}
++			r.total = total;
++			return r;
++		}
++
++		void Pace()
++		{
++			const auto period = std::chrono::nanoseconds(1000000000ll * kTicksPerSecondDen / kTicksPerSecondNum);
++			g_deadline += period;
++			const auto now = Clock::now();
++			if (g_deadline > now)
++				std::this_thread::sleep_until(g_deadline);
++			else if (now - g_deadline > std::chrono::milliseconds(200))
++				g_deadline = now; // far behind (slow PC): do not try to catch up
++		}
++
++		void DoTick()
++		{
++			const uint32_t N = g_tick;
++			const auto mode = Net::GetMode();
++			Pace();
++
++			PadState all[kMaxPlayers];
++			const PadState local = Sample();
++			if (mode == Net::Mode::Session)
++			{
++				Net::SendInput(N + (uint32_t)Net::InputDelay(), local);
++				int64_t waited = 0;
++				if (!Net::WaitInputs(N, all, waited))
++					for (auto& p : all)
++						p = PadState{};
++				if (waited > 40)
++					g_stalls++;
++			}
++			else if (mode == Net::Mode::LabRecord)
++			{
++				all[0] = local;
++				Net::LabInput(N, all[0], true);
++			}
++			else if (mode == Net::Mode::LabReplay)
++				Net::LabInput(N, all[0], false);
++			else
++				all[0] = local;
++
++			for (int i = 0; i < kMaxPlayers; i++)
++				if (g_pads[i])
++					g_pads[i]->Set(all[i].buttons, all[i].lx, all[i].ly, all[i].rx, all[i].ry);
++
++			DeliverIpc();
++			LatteTiming_signalVsync();
++			GpuWindow();
++
++			const int every = std::max(1, Net::HashEvery());
++			if (N > 0 && (N % (uint32_t)every) == 0)
++			{
++				HashReport h = ComputeHash(N);
++				if (mode == Net::Mode::Session)
++					Net::SendHash(h);
++				else
++					Net::LabHash(h);
++			}
++			if ((N & 15) == 0)
++				Net::Stats(N, g_stalls, g_impure, "");
++			g_tick++;
++		}
++	} // namespace
++
++	// ======================================================================== public: clock
++	uint64_t VirtualCycles()
++	{
++		uint64_t used = 0;
++		if (g_inSlice)
++		{
++			if (auto* cpu = PPCInterpreter_getCurrentInstance())
++			{
++				const int64_t u = (int64_t)g_sliceStart - (int64_t)cpu->remainingCycles;
++				used = u > 0 ? (uint64_t)u : 0;
++			}
++		}
++		return (g_cycNum.load(std::memory_order_relaxed) + used) / kCpuShare;
++	}
++
++	void SliceBegin(int32_t startRemaining)
++	{
++		g_sliceStart = startRemaining;
++		g_inSlice = true;
++	}
++
++	void SliceEnd(int32_t remainingNow)
++	{
++		if (!g_inSlice)
++			return;
++		const int64_t u = (int64_t)g_sliceStart - (int64_t)remainingNow;
++		if (u > 0)
++			g_cycNum.fetch_add((uint64_t)u, std::memory_order_relaxed);
++		g_inSlice = false;
++	}
++
++	void IdleStep() { g_cycNum.fetch_add(kIdleStep * kCpuShare, std::memory_order_relaxed); }
++
++	bool UseAudioClock(uint64_t& next)
++	{
++		const uint64_t v = VirtualCycles();
++		const uint64_t step = kCoreClock * 3 / 1000;
++		if (next == 0)
++			next = v;
++		if (v < next)
++			return false;
++		next += step;
++		if (v > next + step * 8)
++			next = v + step;
++		return true;
++	}
++
++	void OnSystemEvents()
++	{
++		if (!g_started)
++		{
++			g_started = true;
++			AttachPads();
++			g_deadline = Clock::now();
++			g_nextTickV = VirtualCycles() + kTickCycles;
++			Net::Log("Lockstep started (" + std::to_string(Net::PlayerCount()) + " player(s), delay " + std::to_string(Net::InputDelay()) + " frames)");
++			return;
++		}
++		if (VirtualCycles() < g_nextTickV)
++			return;
++		g_nextTickV += kTickCycles;
++		DoTick();
++	}
++
++	// ======================================================================== public: GPU
++	uint32_t GpuLimit() { return g_gpuLimit.load(std::memory_order_acquire); }
++
++	void GpuPoll()
++	{
++		g_gpuAlive.store(true, std::memory_order_relaxed);
++		const uint32_t e = g_epoch.load(std::memory_order_acquire);
++		// the loop iteration that just ended began after we last saw g_gpuPrev
++		g_gpuSeen.store(g_gpuPrev, std::memory_order_release);
++		if (e != g_gpuPrev)
++		{
++			g_gpuPrev = e; // a new window opened while we were busy: go around once more
++			return;
++		}
++		while (Active() && g_epoch.load(std::memory_order_acquire) == e && !Latte_GetStopSignal())
++			std::this_thread::sleep_for(std::chrono::microseconds(20));
++		g_gpuPrev = g_epoch.load(std::memory_order_acquire);
++	}
++
++	// ======================================================================== public: IOSU
++	void IpcSubmitted(void* originalBody)
++	{
++		std::scoped_lock l(g_ipcM);
++		const uint64_t seq = ++g_ipcSeq;
++		IpcEntry e;
++		e.submitted = Clock::now();
++		e.body = originalBody;
++		g_ipc[seq] = e;
++		g_ipcByBody[originalBody] = seq;
++	}
++
++	bool IpcReplyDeferred(uint32_t coreIndex, void* originalBody)
++	{
++		std::scoped_lock l(g_ipcM);
++		auto it = g_ipcByBody.find(originalBody);
++		if (it == g_ipcByBody.end())
++			return false;
++		auto& e = g_ipc[it->second];
++		e.done = true;
++		e.core = coreIndex;
++		g_ipcCv.notify_all();
++		return true;
++	}
++
++	// ======================================================================== public: misc
++	uint64_t AgreedUnixTime() { return g_unixTime.load(); }
++	void SetAgreedUnixTime(uint64_t s) { g_unixTime = s; }
++	bool InterpreterOnly() { return g_interpOnly.load(); }
++	void SetInterpreterOnly(bool v) { g_interpOnly = v; }
++
++	void SessionStarting()
++	{
++		g_cycNum = 0;
++		g_inSlice = false;
++		g_started = false;
++		g_tick = 0;
++		g_stalls = g_impure = 0;
++		g_epoch = 0;
++		g_gpuLimit = 0;
++		g_gpuSeen = 0xFFFFFFFFu;
++		g_gpuPrev = 0;
++		g_gpuAlive = false;
++		{
++			std::scoped_lock l(g_ipcM);
++			g_ipc.clear();
++			g_ipcByBody.clear();
++		}
++		g_active = true;
++	}
++
++	void GameStopped()
++	{
++		g_active = false;
++		for (auto& p : g_pads)
++			p.reset();
++		g_local.reset();
++		g_started = false;
++	}
++
++	void Init(const std::string&) {}
++
++	std::string FirstDifferentRegion(const std::string& a, const std::string& b)
++	{
++		const size_t n = std::min(a.size(), b.size()) / 4;
++		for (size_t i = 0; i < n; i++)
++			if (memcmp(a.data() + i * 4, b.data() + i * 4, 4) != 0)
++			{
++				char buf[96];
++				snprintf(buf, sizeof(buf), "game memory at 0x%08X-0x%08X", (unsigned)(mmuRange_MEM2.getBase() + (i << 20)), (unsigned)(mmuRange_MEM2.getBase() + ((i + 1) << 20) - 1));
++				return buf;
++			}
++		return "unknown";
++	}
++} // namespace Lockstep
+diff --git a/src/gui/sdlgui/LockstepNet.cpp b/src/gui/sdlgui/LockstepNet.cpp
+new file mode 100644
+index 0000000..128c976
+--- /dev/null
++++ b/src/gui/sdlgui/LockstepNet.cpp
+@@ -0,0 +1,1577 @@
++// Lockstep netplay: session (TCP 17810), compatibility check, shared save, input exchange, desync report,
++// the Determinism Lab and the /api/coop/lock/* routes. The emulation side is in LockstepCore.cpp.
++//
++// Wire protocol: [u8 type][u32 length][payload] (little endian). Control messages carry JSON, INPUT/HASH are binary.
++//   1 HELLO   guest->host  {"magic":"NEBLOCK1","code","name","build"}
++//   2 WELCOME host->guest  {"ok","slot","msg"}
++//   3 ROSTER  host->guest  {"players":[...],"titleId","manifest","settings","state"}
++//   4 READY   guest->host  {"titleId","manifest"}
++//   5 SAVE    host->guest  archive of the host's save for the chosen game
++//   6 START   host->guest  {"unix","delay","hashEvery","cpu","players","titleId"}
++//   7 INPUT   both         u32 tick, u8 slot, u32 buttons, i8 lx ly rx ry
++//   8 HASH    guest->host  u32 tick, u64 total, chunk hashes
++//   9 BYE
++//  10 PING / 11 PONG       u64 echo
++//  12 DESYNC  host->guest  {"tick","region"}
++
++#include "ControlApi.h"
++#include "Lockstep.h"
++
++#include "config/ActiveSettings.h"
++#include "Cafe/GraphicPack/GraphicPack2.h"
++#include "Cafe/TitleList/GameInfo.h"
++#include "Cafe/TitleList/TitleList.h"
++
++#include <boost/asio.hpp>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstring>
++#include <deque>
++#include <filesystem>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <random>
++#include <thread>
++
++namespace asio = boost::asio;
++using asio::ip::tcp;
++namespace stdfs = std::filesystem;
++
++namespace Lockstep
++{
++	namespace Net
++	{
++		namespace
++		{
++			enum Msg : uint8_t { HELLO = 1, WELCOME, ROSTER, READY, SAVE, START, INPUT, HASH, BYE, PING, PONG, DESYNC };
++			constexpr uint16_t kPort = 17810;
++			constexpr size_t kMaxSave = 192u << 20;
++
++			int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
++
++			struct Conn
++			{
++				tcp::socket sock;
++				std::mutex wm;
++				std::atomic<bool> alive{true};
++				int slot = -1;
++				std::string name;
++				std::vector<std::string> problems;
++				bool ready = false;
++				std::atomic<int> pingMs{-1};
++				int64_t pingSent = 0;
++				explicit Conn(asio::io_context& io) : sock(io) {}
++				bool Send(uint8_t t, const std::string& payload)
++				{
++					std::scoped_lock l(wm);
++					if (!alive)
++						return false;
++					std::string buf;
++					buf.resize(5 + payload.size());
++					buf[0] = (char)t;
++					const uint32_t n = (uint32_t)payload.size();
++					memcpy(&buf[1], &n, 4);
++					memcpy(&buf[5], payload.data(), payload.size());
++					boost::system::error_code ec;
++					asio::write(sock, asio::buffer(buf), ec);
++					if (ec)
++					{
++						alive = false;
++						return false;
++					}
++					return true;
++				}
++				bool Recv(uint8_t& t, std::string& payload)
++				{
++					boost::system::error_code ec;
++					uint8_t hdr[5];
++					asio::read(sock, asio::buffer(hdr, 5), ec);
++					if (ec)
++						return false;
++					uint32_t n;
++					memcpy(&n, hdr + 1, 4);
++					if (n > kMaxSave + (1u << 20))
++						return false;
++					t = hdr[0];
++					payload.resize(n);
++					if (n)
++						asio::read(sock, asio::buffer(payload.data(), n), ec);
++					return !ec;
++				}
++				void Close()
++				{
++					alive = false;
++					boost::system::error_code ec;
++					sock.shutdown(tcp::socket::shutdown_both, ec);
++					sock.close(ec);
++				}
++			};
++
++			struct InputSlot
++			{
++				uint32_t mask = 0;
++				PadState p[kMaxPlayers];
++			};
++
++			struct HashRec
++			{
++				uint32_t tick;
++				uint64_t total;
++				std::string chunks;
++			};
++
++			struct LabState
++			{
++				Mode mode = Mode::Off;
++				std::string phase = "none"; // none | recorded | replayed
++				std::string titleId;
++				int seconds = 60;
++				std::vector<PadState> inputs;
++				std::vector<HashRec> hashes;
++				std::ofstream fIn, fHash;
++				uint32_t ticks = 0;
++				uint32_t checked = 0;
++				bool mismatch = false;
++				uint32_t firstTick = 0;
++				std::string region;
++				bool hasResult = false;
++			};
++
++			struct S
++			{
++				std::mutex m;
++				std::condition_variable cv;
++				std::string role; // "" | host | guest
++				std::string state = "idle"; // idle | running
++				std::string code, name, titleId, error, hostAddr, backupDir;
++				std::string manifestJson;
++				int slot = 0, nPlayers = 1;
++				int delay = 0, hashEvery = 30;
++				std::string cpu = "recompiler";
++				bool shareSave = true;
++				int effDelay = 2;
++				std::vector<std::shared_ptr<Conn>> guests; // host: slot i+1
++				std::shared_ptr<Conn> up; // guest: connection to host
++				struct P { int slot; std::string name; std::vector<std::string> problems; bool ready; int ping; };
++				std::vector<P> roster; // guest mirror / host view
++				std::map<uint32_t, InputSlot> inputs;
++				bool gone[kMaxPlayers] = {};
++				std::map<uint32_t, HashRec> myHash;
++				std::map<uint32_t, std::map<int, HashRec>> peerHash;
++				bool desync = false;
++				uint32_t desyncTick = 0;
++				std::string desyncRegion;
++				std::deque<std::string> log;
++				uint32_t liveTick = 0, liveStalls = 0, liveImpure = 0;
++				std::string waitingFor;
++				std::string pendingSave; // guest: archive received before START
++				asio::io_context io;
++				std::unique_ptr<tcp::acceptor> acc;
++				std::thread accThread;
++				std::atomic<bool> stop{false};
++				LabState lab;
++				fs::path dataDir;
++				std::thread pinger;
++			} s;
++
++			// ------------------------------------------------------------------ helpers
++			void LogLocked(const std::string& t)
++			{
++				s.log.push_back(t);
++				while (s.log.size() > 60)
++					s.log.pop_front();
++			}
++
++			fs::path Dir() { return ActiveSettings::GetUserDataPath() / "lockstep"; }
++
++			std::string TitleHex(uint64_t id)
++			{
++				char b[20];
++				snprintf(b, sizeof(b), "%016llx", (unsigned long long)id);
++				return b;
++			}
++			fs::path SaveDir(const std::string& titleIdHex)
++			{
++				const uint64_t id = std::stoull(titleIdHex, nullptr, 16);
++				char b[40];
++				snprintf(b, sizeof(b), "%08x", (unsigned)(id >> 32));
++				char c[40];
++				snprintf(c, sizeof(c), "%08x", (unsigned)(id & 0xFFFFFFFF));
++				return ActiveSettings::GetMlcPath("usr/save") / b / c;
++			}
++
++			bool CopyDir(const fs::path& from, const fs::path& to)
++			{
++				std::error_code ec;
++				stdfs::remove_all(to, ec);
++				if (!stdfs::exists(from, ec))
++					return true;
++				stdfs::create_directories(to, ec);
++				stdfs::copy(from, to, stdfs::copy_options::recursive | stdfs::copy_options::overwrite_existing, ec);
++				return !ec;
++			}
++
++			bool PackDir(const fs::path& dir, std::string& out)
++			{
++				std::error_code ec;
++				out.clear();
++				if (!stdfs::exists(dir, ec))
++					return true;
++				for (auto it = stdfs::recursive_directory_iterator(dir, ec); !ec && it != stdfs::recursive_directory_iterator(); it.increment(ec))
++				{
++					if (!it->is_regular_file())
++						continue;
++					const std::string rel = stdfs::relative(it->path(), dir).generic_string();
++					const uint64_t sz = (uint64_t)it->file_size();
++					if (out.size() + sz + rel.size() + 16 > kMaxSave)
++						return false;
++					const uint16_t pl = (uint16_t)rel.size();
++					out.append((const char*)&pl, 2);
++					out += rel;
++					out.append((const char*)&sz, 8);
++					std::ifstream f(it->path(), std::ios::binary);
++					const size_t at = out.size();
++					out.resize(at + sz);
++					f.read(&out[at], (std::streamsize)sz);
++				}
++				return true;
++			}
++
++			bool UnpackDir(const std::string& in, const fs::path& dir)
++			{
++				std::error_code ec;
++				stdfs::remove_all(dir, ec);
++				stdfs::create_directories(dir, ec);
++				size_t p = 0;
++				while (p + 2 <= in.size())
++				{
++					uint16_t pl;
++					memcpy(&pl, &in[p], 2);
++					p += 2;
++					if (p + pl + 8 > in.size())
++						return false;
++					const std::string rel = in.substr(p, pl);
++					p += pl;
++					uint64_t sz;
++					memcpy(&sz, &in[p], 8);
++					p += 8;
++					if (p + sz > in.size() || rel.find("..") != std::string::npos)
++						return false;
++					const fs::path dst = dir / stdfs::path(rel);
++					stdfs::create_directories(dst.parent_path(), ec);
++					std::ofstream f(dst, std::ios::binary);
++					f.write(&in[p], (std::streamsize)sz);
++					p += sz;
++				}
++				return true;
++			}
++
++			std::string RandomCode()
++			{
++				static const char* al = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
++				std::random_device rd;
++				std::string c;
++				for (int i = 0; i < 5; i++)
++					c += al[rd() % 32];
++				return c;
++			}
++
++			std::string LocalIp()
++			{
++				try
++				{
++					asio::io_context io;
++					asio::ip::udp::socket u(io);
++					u.connect(asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 80));
++					return u.local_endpoint().address().to_string();
++				}
++				catch (...) { return ""; }
++			}
++
++			bool IsVisualPack(const std::string& path)
++			{
++				std::string p = path;
++				for (auto& c : p)
++					c = (char)tolower((unsigned char)c);
++				for (const char* k : {"resolution", "anti-aliasing", "antialiasing", "shadow", "filter", "bloom", "ambient", "depth of field", "texture", "sharpen"})
++					if (p.find(k) != std::string::npos)
++						return true;
++				return false;
++			}
++
++			// compatibility manifest of the chosen game on THIS pc (JSON)
++			std::string BuildManifest(const std::string& titleIdHex, std::string* err)
++			{
++				ControlApi::Json j;
++				GameInfo2 gi;
++				try { gi = CafeTitleList::GetGameInfo(std::stoull(titleIdHex, nullptr, 16)); } catch (...) {}
++				j.w.StartObject();
++				if (!gi.IsValid())
++				{
++					if (err)
++						*err = "This PC does not have that game.";
++					j.KB("missing", true);
++					j.KS("titleId", titleIdHex);
++					j.w.EndObject();
++					return j.sb.GetString();
++				}
++				j.KS("titleId", titleIdHex);
++				j.KS("title", gi.GetTitleName());
++				j.KI("version", gi.GetVersion());
++				j.KI("update", 0);
++				j.KI("dlc", gi.GetAOCVersion());
++				j.KS("build", ControlApi::AppVersion());
++				j.KS("cpuMode", s.cpu);
++				std::vector<std::string> packs;
++				for (const auto& gp : GraphicPack2::GetGraphicPacks())
++					if (gp->IsEnabled() && !IsVisualPack(gp->GetVirtualPath()))
++						packs.push_back(gp->GetVirtualPath());
++				std::sort(packs.begin(), packs.end());
++				j.K("packs");
++				j.w.StartArray();
++				for (auto& p : packs)
++					j.S(p);
++				j.w.EndArray();
++				j.w.EndObject();
++				return j.sb.GetString();
++			}
++
++			std::vector<std::string> Compare(const std::string& hostJson, const std::string& guestJson)
++			{
++				std::vector<std::string> out;
++				rapidjson::Document a, b;
++				a.Parse(hostJson.c_str());
++				b.Parse(guestJson.c_str());
++				if (!b.IsObject() || b.HasMember("missing"))
++					return {"This PC does not have the game."};
++				if (!a.IsObject())
++					return out;
++				auto geti = [](rapidjson::Document& d, const char* k) { return d.HasMember(k) && d[k].IsInt64() ? d[k].GetInt64() : 0; };
++				auto gets = [](rapidjson::Document& d, const char* k) { return d.HasMember(k) && d[k].IsString() ? std::string(d[k].GetString()) : std::string(); };
++				if (geti(a, "version") != geti(b, "version"))
++					out.push_back("Game version differs (host v" + std::to_string(geti(a, "version")) + ", you v" + std::to_string(geti(b, "version")) + ").");
++				if (geti(a, "dlc") != geti(b, "dlc"))
++					out.push_back("DLC version differs.");
++				if (gets(a, "build") != gets(b, "build"))
++					out.push_back("NEBULATOR version differs (host " + gets(a, "build") + ", you " + gets(b, "build") + "). Update so everyone has the same one.");
++				auto packs = [](rapidjson::Document& d) { std::vector<std::string> v; if (d.HasMember("packs") && d["packs"].IsArray()) for (auto& x : d["packs"].GetArray()) if (x.IsString()) v.push_back(x.GetString()); return v; };
++				auto pa = packs(a), pb = packs(b);
++				if (pa != pb)
++				{
++					std::string t = "Rule-changing graphics packs differ. Host: " + (pa.empty() ? std::string("none") : pa[0] + (pa.size() > 1 ? " +" + std::to_string(pa.size() - 1) : "")) + ". You: " + (pb.empty() ? std::string("none") : pb[0] + (pb.size() > 1 ? " +" + std::to_string(pb.size() - 1) : "")) + ".";
++					out.push_back(t);
++				}
++				return out;
++			}
++
++			// ------------------------------------------------------------------ roster / broadcast
++			std::string RosterJson()
++			{
++				ControlApi::Json j;
++				j.w.StartObject();
++				j.K("players");
++				j.w.StartArray();
++				for (auto& p : s.roster)
++				{
++					j.w.StartObject();
++					j.KI("slot", p.slot);
++					j.KS("name", p.name);
++					j.KB("ready", p.ready);
++					j.KI("ping", p.ping);
++					j.K("problems");
++					j.w.StartArray();
++					for (auto& t : p.problems)
++						j.S(t);
++					j.w.EndArray();
++					j.w.EndObject();
++				}
++				j.w.EndArray();
++				j.KS("titleId", s.titleId);
++				j.K("manifest");
++				if (s.manifestJson.empty())
++					j.w.Null();
++				else
++					j.w.RawValue(s.manifestJson.c_str(), s.manifestJson.size(), rapidjson::kObjectType);
++				j.K("settings");
++				j.w.StartObject();
++				j.KI("delay", s.delay);
++				j.KI("hashEvery", s.hashEvery);
++				j.KS("cpu", s.cpu);
++				j.KB("shareSave", s.shareSave);
++				j.w.EndObject();
++				j.KS("state", s.state);
++				j.w.EndObject();
++				return j.sb.GetString();
++			}
++
++			void RebuildRosterLocked(const std::string& hostName)
++			{
++				s.roster.clear();
++				s.roster.push_back({0, hostName, {}, !s.titleId.empty(), 0});
++				for (auto& g : s.guests)
++					s.roster.push_back({g->slot, g->name, g->problems, g->ready, g->pingMs.load()});
++			}
++
++			void BroadcastRosterLocked()
++			{
++				RebuildRosterLocked(s.name);
++				const std::string r = RosterJson();
++				for (auto& g : s.guests)
++					g->Send(ROSTER, r);
++				s.cv.notify_all();
++			}
++
++			void SendToOthersLocked(uint8_t t, const std::string& payload, const Conn* except)
++			{
++				for (auto& g : s.guests)
++					if (g.get() != except)
++						g->Send(t, payload);
++			}
++
++			// ------------------------------------------------------------------ inputs / hashes
++			void StoreInputLocked(uint32_t tick, int slot, const PadState& p)
++			{
++				if (slot < 0 || slot >= kMaxPlayers)
++					return;
++				auto& e = s.inputs[tick];
++				e.p[slot] = p;
++				e.mask |= 1u << slot;
++				s.cv.notify_all();
++			}
++
++			std::string InputPacket(uint32_t tick, int slot, const PadState& p)
++			{
++				std::string b(13, 0);
++				memcpy(&b[0], &tick, 4);
++				b[4] = (char)slot;
++				memcpy(&b[5], &p.buttons, 4);
++				b[9] = (char)p.lx;
++				b[10] = (char)p.ly;
++				b[11] = (char)p.rx;
++				b[12] = (char)p.ry;
++				return b;
++			}
++
++			void CheckHashLocked(uint32_t tick)
++			{
++				auto mine = s.myHash.find(tick);
++				auto peers = s.peerHash.find(tick);
++				if (mine == s.myHash.end() || peers == s.peerHash.end())
++					return;
++				int need = 0;
++				for (int i = 1; i < s.nPlayers; i++)
++					if (!s.gone[i])
++						need++;
++				if ((int)peers->second.size() < need)
++					return;
++				for (auto& [slot, h] : peers->second)
++				{
++					if (h.total != mine->second.total && !s.desync)
++					{
++						s.desync = true;
++						s.desyncTick = tick;
++						s.desyncRegion = FirstDifferentRegion(mine->second.chunks, h.chunks);
++						LogLocked("DESYNC at tick " + std::to_string(tick) + " between player 1 and player " + std::to_string(slot + 1) + " (" + s.desyncRegion + ")");
++						ControlApi::Json j;
++						j.w.StartObject();
++						j.KI("tick", tick);
++						j.KS("region", s.desyncRegion);
++						j.w.EndObject();
++						SendToOthersLocked(DESYNC, j.sb.GetString(), nullptr);
++					}
++				}
++				s.peerHash.erase(tick);
++				while (s.myHash.size() > 64)
++					s.myHash.erase(s.myHash.begin());
++				while (s.peerHash.size() > 64)
++					s.peerHash.erase(s.peerHash.begin());
++			}
++
++			void DropGuest(const std::shared_ptr<Conn>& g)
++			{
++				g->Close();
++				std::scoped_lock l(s.m);
++				auto it = std::find(s.guests.begin(), s.guests.end(), g);
++				if (it == s.guests.end())
++					return;
++				if (g->slot >= 0 && g->slot < kMaxPlayers && s.state == "running")
++					s.gone[g->slot] = true;
++				LogLocked(g->name + " left");
++				if (s.state != "running")
++				{
++					s.guests.erase(it);
++					// keep slots contiguous before the game starts
++					int n = 1;
++					for (auto& x : s.guests)
++						x->slot = n++;
++				}
++				BroadcastRosterLocked();
++			}
++
++			// ------------------------------------------------------------------ guest side receive loop
++			void ApplyRosterLocked(const rapidjson::Document& d)
++			{
++				s.roster.clear();
++				if (d.HasMember("players") && d["players"].IsArray())
++					for (auto& p : d["players"].GetArray())
++					{
++						S::P e;
++						e.slot = p.HasMember("slot") ? p["slot"].GetInt() : 0;
++						e.name = p.HasMember("name") ? p["name"].GetString() : "";
++						e.ready = p.HasMember("ready") && p["ready"].GetBool();
++						e.ping = p.HasMember("ping") ? p["ping"].GetInt() : -1;
++						if (p.HasMember("problems"))
++							for (auto& t : p["problems"].GetArray())
++								e.problems.push_back(t.GetString());
++						s.roster.push_back(e);
++					}
++				if (d.HasMember("titleId"))
++					s.titleId = d["titleId"].GetString();
++				if (d.HasMember("manifest") && d["manifest"].IsObject())
++				{
++					rapidjson::StringBuffer sb;
++					rapidjson::Writer<rapidjson::StringBuffer> w(sb);
++					d["manifest"].Accept(w);
++					s.manifestJson = sb.GetString();
++				}
++				if (d.HasMember("settings") && d["settings"].IsObject())
++				{
++					auto& st = d["settings"];
++					s.delay = st.HasMember("delay") ? st["delay"].GetInt() : 0;
++					s.hashEvery = st.HasMember("hashEvery") ? st["hashEvery"].GetInt() : 30;
++					s.cpu = st.HasMember("cpu") ? st["cpu"].GetString() : "recompiler";
++					s.shareSave = !st.HasMember("shareSave") || st["shareSave"].GetBool();
++				}
++			}
++
++			void BeginGameLocked(const std::string& unixStr, int delay, int hashEvery, const std::string& cpu, int players, const std::string& titleId, bool applySave);
++
++			void GuestLoop(std::shared_ptr<Conn> c)
++			{
++				uint8_t t;
++				std::string p;
++				while (!s.stop && c->Recv(t, p))
++				{
++					rapidjson::Document d;
++					if (t == ROSTER)
++					{
++						d.Parse(p.c_str());
++						if (!d.IsObject())
++							continue;
++						std::string pickedBefore;
++						std::string newTitle;
++						{
++							std::scoped_lock l(s.m);
++							pickedBefore = s.titleId;
++							ApplyRosterLocked(d);
++							newTitle = s.titleId;
++						}
++						if (!newTitle.empty() && newTitle != pickedBefore)
++						{
++							std::string err;
++							const std::string man = BuildManifest(newTitle, &err);
++							ControlApi::Json j;
++							j.w.StartObject();
++							j.KS("titleId", newTitle);
++							j.K("manifest");
++							j.w.RawValue(man.c_str(), man.size(), rapidjson::kObjectType);
++							j.w.EndObject();
++							c->Send(READY, j.sb.GetString());
++						}
++						s.cv.notify_all();
++					}
++					else if (t == SAVE)
++					{
++						std::scoped_lock l(s.m);
++						s.pendingSave = p;
++					}
++					else if (t == START)
++					{
++						d.Parse(p.c_str());
++						if (!d.IsObject())
++							continue;
++						std::scoped_lock l(s.m);
++						BeginGameLocked(std::to_string(d["unix"].GetUint64()), d["delay"].GetInt(), d["hashEvery"].GetInt(), d["cpu"].GetString(), d["players"].GetInt(), d["titleId"].GetString(), true);
++					}
++					else if (t == INPUT && p.size() >= 13)
++					{
++						uint32_t tick;
++						memcpy(&tick, &p[0], 4);
++						PadState ps;
++						memcpy(&ps.buttons, &p[5], 4);
++						ps.lx = (int8_t)p[9];
++						ps.ly = (int8_t)p[10];
++						ps.rx = (int8_t)p[11];
++						ps.ry = (int8_t)p[12];
++						std::scoped_lock l(s.m);
++						StoreInputLocked(tick, (uint8_t)p[4], ps);
++					}
++					else if (t == DESYNC)
++					{
++						d.Parse(p.c_str());
++						std::scoped_lock l(s.m);
++						if (d.IsObject() && !s.desync)
++						{
++							s.desync = true;
++							s.desyncTick = d["tick"].GetUint();
++							s.desyncRegion = d["region"].GetString();
++							LogLocked("DESYNC at tick " + std::to_string(s.desyncTick) + " (" + s.desyncRegion + ")");
++						}
++					}
++					else if (t == PING)
++						c->Send(PONG, p);
++					else if (t == BYE)
++						break;
++				}
++				std::scoped_lock l(s.m);
++				if (s.role == "guest")
++				{
++					LogLocked("The host closed the session");
++					s.role.clear();
++					s.up.reset();
++					for (int i = 0; i < kMaxPlayers; i++)
++						s.gone[i] = true;
++					s.cv.notify_all();
++				}
++			}
++
++			// ------------------------------------------------------------------ host side
++			void HostConnLoop(std::shared_ptr<Conn> c)
++			{
++				uint8_t t;
++				std::string p;
++				// handshake
++				if (!c->Recv(t, p) || t != HELLO)
++				{
++					c->Close();
++					return;
++				}
++				rapidjson::Document hello;
++				hello.Parse(p.c_str());
++				std::string reject;
++				if (!hello.IsObject() || !hello.HasMember("magic") || std::string(hello["magic"].GetString()) != "NEBLOCK1")
++					reject = "That is not a NEBULATOR lockstep host.";
++				{
++					std::scoped_lock l(s.m);
++					if (reject.empty() && (s.role != "host"))
++						reject = "The host is not accepting players.";
++					else if (reject.empty() && (!hello.HasMember("code") || std::string(hello["code"].GetString()) != s.code))
++						reject = "Wrong join code.";
++					else if (reject.empty() && s.state == "running")
++						reject = "The game already started.";
++					else if (reject.empty() && (int)s.guests.size() >= kMaxPlayers - 1)
++						reject = "The session is full.";
++					if (reject.empty())
++					{
++						c->name = hello.HasMember("name") ? hello["name"].GetString() : "Guest";
++						if (c->name.size() > 24)
++							c->name.resize(24);
++						c->slot = (int)s.guests.size() + 1;
++						s.guests.push_back(c);
++						LogLocked(c->name + " joined as player " + std::to_string(c->slot + 1));
++					}
++				}
++				ControlApi::Json w;
++				w.w.StartObject();
++				w.KB("ok", reject.empty());
++				w.KI("slot", c->slot);
++				w.KS("msg", reject);
++				w.w.EndObject();
++				c->Send(WELCOME, w.sb.GetString());
++				if (!reject.empty())
++				{
++					c->Close();
++					return;
++				}
++				{
++					std::scoped_lock l(s.m);
++					BroadcastRosterLocked();
++				}
++				while (!s.stop && c->Recv(t, p))
++				{
++					if (t == READY)
++					{
++						rapidjson::Document d;
++						d.Parse(p.c_str());
++						if (!d.IsObject() || !d.HasMember("manifest"))
++							continue;
++						rapidjson::StringBuffer sb;
++						rapidjson::Writer<rapidjson::StringBuffer> wr(sb);
++						d["manifest"].Accept(wr);
++						std::scoped_lock l(s.m);
++						c->problems = Compare(s.manifestJson, sb.GetString());
++						c->ready = c->problems.empty();
++						BroadcastRosterLocked();
++					}
++					else if (t == INPUT && p.size() >= 13)
++					{
++						uint32_t tick;
++						memcpy(&tick, &p[0], 4);
++						PadState ps;
++						memcpy(&ps.buttons, &p[5], 4);
++						ps.lx = (int8_t)p[9];
++						ps.ly = (int8_t)p[10];
++						ps.rx = (int8_t)p[11];
++						ps.ry = (int8_t)p[12];
++						std::scoped_lock l(s.m);
++						StoreInputLocked(tick, c->slot, ps); // slot is decided by us, never by the sender
++						SendToOthersLocked(INPUT, InputPacket(tick, c->slot, ps), c.get());
++					}
++					else if (t == HASH && p.size() >= 12)
++					{
++						HashRec h;
++						memcpy(&h.tick, &p[0], 4);
++						memcpy(&h.total, &p[4], 8);
++						h.chunks = p.substr(12);
++						std::scoped_lock l(s.m);
++						s.peerHash[h.tick][c->slot] = h;
++						CheckHashLocked(h.tick);
++					}
++					else if (t == PONG && p.size() >= 8)
++						c->pingMs = (int)(NowMs() - c->pingSent);
++					else if (t == BYE)
++						break;
++				}
++				DropGuest(c);
++			}
++
++			void AcceptLoop()
++			{
++				while (!s.stop && s.acc)
++				{
++					auto c = std::make_shared<Conn>(s.io);
++					boost::system::error_code ec;
++					s.acc->accept(c->sock, ec);
++					if (ec)
++						break;
++					c->sock.set_option(tcp::no_delay(true), ec);
++					std::thread(HostConnLoop, c).detach();
++				}
++			}
++
++			void PingLoop()
++			{
++				int tickN = 0;
++				while (!s.stop)
++				{
++					std::this_thread::sleep_for(std::chrono::seconds(1));
++					std::scoped_lock l(s.m);
++					if (s.role != "host")
++						return;
++					for (auto& g : s.guests)
++					{
++						g->pingSent = NowMs();
++						uint64_t e = (uint64_t)g->pingSent;
++						g->Send(PING, std::string((const char*)&e, 8));
++					}
++					if ((++tickN & 1) == 0 && s.state != "running")
++						BroadcastRosterLocked();
++				}
++			}
++
++			void StopAllLocked()
++			{
++				s.stop = true;
++				for (auto& g : s.guests)
++				{
++					g->Send(BYE, "");
++					g->Close();
++				}
++				s.guests.clear();
++				if (s.up)
++				{
++					s.up->Send(BYE, "");
++					s.up->Close();
++					s.up.reset();
++				}
++				boost::system::error_code ec;
++				if (s.acc)
++				{
++					s.acc->close(ec);
++					s.acc.reset();
++				}
++				s.role.clear();
++				s.state = "idle";
++				s.roster.clear();
++				s.titleId.clear();
++				s.manifestJson.clear();
++				s.inputs.clear();
++				s.cv.notify_all();
++			}
++
++			// called with s.m held; swaps the save (guests), configures the engine and launches the game
++			void BeginGameLocked(const std::string& unixStr, int delay, int hashEvery, const std::string& cpu, int players, const std::string& titleId, bool applySave)
++			{
++				if (s.state == "running")
++					return;
++				std::string err;
++				if (applySave && s.shareSave && !s.pendingSave.empty())
++				{
++					char ts[32];
++					const time_t now = time(nullptr);
++					strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", gmtime(&now));
++					const fs::path bdir = Dir() / "backups" / (titleId + "-" + ts);
++					CopyDir(SaveDir(titleId), bdir);
++					s.backupDir = bdir.string();
++					if (!UnpackDir(s.pendingSave, SaveDir(titleId)))
++						LogLocked("Could not apply the host's save");
++					else
++						LogLocked("Your save was backed up and replaced by the host's");
++					s.pendingSave.clear();
++				}
++				s.nPlayers = players;
++				s.effDelay = std::max(1, delay);
++				s.hashEvery = hashEvery;
++				s.titleId = titleId;
++				s.inputs.clear();
++				s.myHash.clear();
++				s.peerHash.clear();
++				s.desync = false;
++				for (auto& g : s.gone)
++					g = false;
++				SetAgreedUnixTime(std::strtoull(unixStr.c_str(), nullptr, 10));
++				SetInterpreterOnly(cpu == "interpreter");
++				SessionStarting();
++				s.state = "running";
++				LogLocked("Starting the game (delay " + std::to_string(s.effDelay) + " frames, " + std::to_string(players) + " players)");
++				std::thread([titleId] {
++					std::string e;
++					if (!ControlApi::LaunchTitle(titleId, e))
++					{
++						std::scoped_lock l(s.m);
++						s.error = e;
++						s.state = "idle";
++						Lockstep::g_active = false;
++						LogLocked("Launch failed: " + e);
++					}
++				}).detach();
++			}
++
++			int AutoDelay()
++			{
++				int a = 0, b = 0;
++				for (auto& g : s.guests)
++				{
++					const int p = std::max(0, g->pingMs.load());
++					if (p >= a)
++					{
++						b = a;
++						a = p;
++					}
++					else if (p > b)
++						b = p;
++				}
++				const double oneWay = (a + b) / 2.0 + (s.guests.size() > 1 ? 0 : 0);
++				return std::max(2, std::min(12, (int)std::ceil(oneWay / 16.68) + 1));
++			}
++
++			// ------------------------------------------------------------------ Determinism Lab files
++			fs::path LabDir() { return Dir() / "lab"; }
++
++			void LabWriteResult()
++			{
++				ControlApi::Json j;
++				j.w.StartObject();
++				j.KS("titleId", s.lab.titleId);
++				j.KB("identical", !s.lab.mismatch);
++				j.KI("checked", s.lab.checked);
++				j.KI("ticks", s.lab.ticks);
++				j.KI("firstTick", s.lab.firstTick);
++				j.KS("region", s.lab.region);
++				j.w.EndObject();
++				std::ofstream(LabDir() / "result.json", std::ios::trunc) << j.sb.GetString();
++			}
++
++			void LabLoadMeta()
++			{
++				std::ifstream f(LabDir() / "meta.json");
++				std::string t((std::istreambuf_iterator<char>(f)), {});
++				rapidjson::Document d;
++				d.Parse(t.c_str());
++				if (d.IsObject())
++				{
++					s.lab.titleId = d.HasMember("titleId") ? d["titleId"].GetString() : "";
++					s.lab.seconds = d.HasMember("seconds") ? d["seconds"].GetInt() : 60;
++					s.lab.ticks = d.HasMember("ticks") ? d["ticks"].GetUint() : 0;
++					s.lab.phase = d.HasMember("phase") ? d["phase"].GetString() : "none";
++					SetAgreedUnixTime(d.HasMember("unix") ? d["unix"].GetUint64() : 0);
++					s.cpu = d.HasMember("cpu") ? d["cpu"].GetString() : "recompiler";
++				}
++			}
++
++			void LabSaveMeta(const std::string& phase, uint64_t unixT)
++			{
++				ControlApi::Json j;
++				j.w.StartObject();
++				j.KS("titleId", s.lab.titleId);
++				j.KI("seconds", s.lab.seconds);
++				j.KI("ticks", s.lab.ticks);
++				j.KS("phase", phase);
++				j.KI("unix", (int64_t)unixT);
++				j.KS("cpu", s.cpu);
++				j.w.EndObject();
++				std::ofstream(LabDir() / "meta.json", std::ios::trunc) << j.sb.GetString();
++			}
++
++			void RestorePending()
++			{
++				// a Determinism Lab run swaps the save for a known starting point; put the player's own back
++				const fs::path marker = LabDir() / "restore_pending.json";
++				std::error_code ec;
++				if (!stdfs::exists(marker, ec))
++					return;
++				std::ifstream f(marker);
++				std::string t((std::istreambuf_iterator<char>(f)), {});
++				rapidjson::Document d;
++				d.Parse(t.c_str());
++				if (d.IsObject() && d.HasMember("titleId"))
++				{
++					const std::string id = d["titleId"].GetString();
++					const fs::path orig = LabDir() / "save_orig";
++					stdfs::remove_all(SaveDir(id), ec);
++					if (stdfs::exists(orig, ec))
++						CopyDir(orig, SaveDir(id));
++				}
++				f.close();
++				stdfs::remove(marker, ec);
++			}
++
++			void LabStart(const std::string& titleId, bool record, int seconds)
++			{
++				std::error_code ec;
++				stdfs::create_directories(LabDir(), ec);
++				RestorePending();
++				// back up the player's own save and mark it for restore
++				CopyDir(SaveDir(titleId), LabDir() / "save_orig");
++				{
++					ControlApi::Json j;
++					j.w.StartObject();
++					j.KS("titleId", titleId);
++					j.w.EndObject();
++					std::ofstream(LabDir() / "restore_pending.json", std::ios::trunc) << j.sb.GetString();
++				}
++				s.lab.hashes.clear();
++				s.lab.inputs.clear();
++				s.lab.checked = 0;
++				s.lab.mismatch = false;
++				s.lab.firstTick = 0;
++				s.lab.region.clear();
++				s.lab.hasResult = false;
++				s.lab.titleId = titleId;
++				if (record)
++				{
++					s.lab.seconds = seconds;
++					CopyDir(SaveDir(titleId), LabDir() / "save_start");
++					const uint64_t now = (uint64_t)time(nullptr);
++					SetAgreedUnixTime(now);
++					s.lab.ticks = 0;
++					LabSaveMeta("recording", now);
++					s.lab.fIn.open(LabDir() / "inputs.bin", std::ios::binary | std::ios::trunc);
++					s.lab.fHash.open(LabDir() / "hashes.bin", std::ios::binary | std::ios::trunc);
++					stdfs::remove(LabDir() / "result.json", ec);
++					s.lab.mode = Mode::LabRecord;
++				}
++				else
++				{
++					LabLoadMeta();
++					// load the recording
++					std::ifstream fi(LabDir() / "inputs.bin", std::ios::binary);
++					PadState p;
++					while (fi.read((char*)&p.buttons, 4) && fi.read((char*)&p.lx, 4))
++						s.lab.inputs.push_back(p);
++					std::ifstream fh(LabDir() / "hashes.bin", std::ios::binary);
++					for (;;)
++					{
++						HashRec h;
++						uint32_t n;
++						if (!fh.read((char*)&h.tick, 4) || !fh.read((char*)&h.total, 8) || !fh.read((char*)&n, 4))
++							break;
++						h.chunks.resize(n);
++						if (!fh.read(&h.chunks[0], n))
++							break;
++						s.lab.hashes.push_back(std::move(h));
++					}
++					CopyDir(LabDir() / "save_start", SaveDir(titleId));
++					s.lab.mode = Mode::LabReplay;
++				}
++				SetInterpreterOnly(s.cpu == "interpreter");
++				s.nPlayers = 1;
++				s.hashEvery = 30;
++				s.effDelay = 0;
++				SessionStarting();
++			}
++		} // namespace
++
++		// ======================================================================= core-facing API
++		Mode GetMode()
++		{
++			if (s.lab.mode != Mode::Off)
++				return s.lab.mode;
++			return (s.role.empty() || s.state != "running") ? Mode::Off : Mode::Session;
++		}
++		int LocalSlot() { return s.role == "guest" ? s.slot : 0; }
++		int PlayerCount() { return s.lab.mode != Mode::Off ? 1 : std::max(1, s.nPlayers); }
++		int InputDelay() { return s.effDelay; }
++		int HashEvery() { return std::max(1, s.hashEvery); }
++		uint32_t PingMs()
++		{
++			std::scoped_lock l(s.m);
++			for (auto& p : s.roster)
++				if (p.slot == s.slot)
++					return (uint32_t)std::max(0, p.ping);
++			return 0;
++		}
++
++		void Log(const std::string& t)
++		{
++			std::scoped_lock l(s.m);
++			LogLocked(t);
++		}
++
++		void Stats(uint32_t tick, uint32_t stalls, uint32_t impure, const std::string& waiting)
++		{
++			std::scoped_lock l(s.m);
++			s.liveTick = tick;
++			s.liveStalls = stalls;
++			s.liveImpure = impure;
++			s.waitingFor = waiting;
++			if (s.lab.mode != Mode::Off)
++				s.lab.ticks = std::max(s.lab.ticks, tick);
++		}
++
++		void SendInput(uint32_t tick, const PadState& p)
++		{
++			std::scoped_lock l(s.m);
++			if (s.role == "host")
++			{
++				StoreInputLocked(tick, 0, p);
++				SendToOthersLocked(INPUT, InputPacket(tick, 0, p), nullptr);
++			}
++			else if (s.role == "guest" && s.up)
++			{
++				StoreInputLocked(tick, s.slot, p);
++				s.up->Send(INPUT, InputPacket(tick, s.slot, p));
++			}
++		}
++
++		bool WaitInputs(uint32_t tick, PadState out[kMaxPlayers], int64_t& waitedMs)
++		{
++			const int64_t t0 = NowMs();
++			std::unique_lock l(s.m);
++			if (tick < (uint32_t)s.effDelay)
++			{
++				for (int i = 0; i < kMaxPlayers; i++)
++					out[i] = PadState{};
++				waitedMs = 0;
++				return true;
++			}
++			auto have = [&] {
++				auto it = s.inputs.find(tick);
++				for (int i = 0; i < s.nPlayers; i++)
++				{
++					if (s.gone[i])
++						continue;
++					if (it == s.inputs.end() || !((it->second.mask >> i) & 1))
++						return false;
++				}
++				return true;
++			};
++			while (!have() && !s.stop && !s.role.empty())
++			{
++				auto it = s.inputs.find(tick);
++				s.waitingFor.clear();
++				for (int i = 0; i < s.nPlayers; i++)
++					if (!s.gone[i] && (it == s.inputs.end() || !((it->second.mask >> i) & 1)))
++						s.waitingFor += (s.waitingFor.empty() ? "" : ", ") + std::string("player ") + std::to_string(i + 1);
++				s.cv.wait_for(l, std::chrono::milliseconds(50));
++			}
++			s.waitingFor.clear();
++			waitedMs = NowMs() - t0;
++			if (s.role.empty())
++			{
++				for (int i = 0; i < kMaxPlayers; i++)
++					out[i] = PadState{};
++				return false;
++			}
++			auto it = s.inputs.find(tick);
++			for (int i = 0; i < kMaxPlayers; i++)
++				out[i] = (it != s.inputs.end() && ((it->second.mask >> i) & 1)) ? it->second.p[i] : PadState{};
++			while (!s.inputs.empty() && s.inputs.begin()->first + 2 < tick)
++				s.inputs.erase(s.inputs.begin());
++			return true;
++		}
++
++		void SendHash(const HashReport& r)
++		{
++			std::scoped_lock l(s.m);
++			HashRec h{r.tick, r.total, r.chunks};
++			s.myHash[r.tick] = h;
++			if (s.role == "host")
++				CheckHashLocked(r.tick);
++			else if (s.role == "guest" && s.up)
++			{
++				std::string b(12, 0);
++				memcpy(&b[0], &r.tick, 4);
++				memcpy(&b[4], &r.total, 8);
++				b += r.chunks;
++				s.up->Send(HASH, b);
++			}
++		}
++
++		void LabInput(uint32_t tick, PadState& slot0, bool record)
++		{
++			std::scoped_lock l(s.m);
++			if (record)
++			{
++				s.lab.inputs.push_back(slot0);
++				s.lab.fIn.write((const char*)&slot0.buttons, 4);
++				s.lab.fIn.write((const char*)&slot0.lx, 4);
++				if ((tick & 31) == 0)
++					s.lab.fIn.flush();
++				s.lab.ticks = tick;
++			}
++			else
++				slot0 = tick < s.lab.inputs.size() ? s.lab.inputs[tick] : PadState{};
++		}
++
++		void LabHash(const HashReport& r)
++		{
++			std::scoped_lock l(s.m);
++			if (s.lab.mode == Mode::LabRecord)
++			{
++				const uint32_t n = (uint32_t)r.chunks.size();
++				s.lab.fHash.write((const char*)&r.tick, 4);
++				s.lab.fHash.write((const char*)&r.total, 8);
++				s.lab.fHash.write((const char*)&n, 4);
++				s.lab.fHash.write(r.chunks.data(), n);
++				s.lab.fHash.flush();
++				s.lab.fIn.flush();
++				LabSaveMeta("recorded", AgreedUnixTime());
++			}
++			else if (s.lab.mode == Mode::LabReplay)
++			{
++				for (auto& h : s.lab.hashes)
++					if (h.tick == r.tick)
++					{
++						s.lab.checked++;
++						if (h.total != r.total && !s.lab.mismatch)
++						{
++							s.lab.mismatch = true;
++							s.lab.firstTick = r.tick;
++							s.lab.region = FirstDifferentRegion(h.chunks, r.chunks);
++							LogLocked("Replay drifted at tick " + std::to_string(r.tick) + " (" + s.lab.region + ")");
++						}
++						LabWriteResult();
++						break;
++					}
++			}
++		}
++
++		// ======================================================================= API
++		namespace
++		{
++			using ControlApi::Json;
++
++			void WriteStatus(Json& j)
++			{
++				std::scoped_lock l(s.m);
++				if (s.role == "host")
++					RebuildRosterLocked(s.name);
++				j.w.StartObject();
++				j.KS("role", s.role);
++				j.KS("state", s.state);
++				j.KS("code", s.role == "host" ? s.code : "");
++				j.KS("ip", s.role == "host" ? LocalIp() : "");
++				j.KI("port", kPort);
++				j.KI("slot", s.slot);
++				j.KS("hostAddr", s.hostAddr);
++				j.KS("titleId", s.titleId);
++				j.KS("error", s.error);
++				j.KS("backupDir", s.backupDir);
++				j.K("manifest");
++				if (s.manifestJson.empty())
++					j.w.Null();
++				else
++					j.w.RawValue(s.manifestJson.c_str(), s.manifestJson.size(), rapidjson::kObjectType);
++				j.K("players");
++				j.w.StartArray();
++				for (auto& p : s.roster)
++				{
++					j.w.StartObject();
++					j.KI("slot", p.slot);
++					j.KS("name", p.name);
++					j.KB("you", p.slot == (s.role == "guest" ? s.slot : 0));
++					j.KB("ready", p.ready);
++					j.KI("pingMs", p.ping);
++					j.K("problems");
++					j.w.StartArray();
++					for (auto& t : p.problems)
++						j.S(t);
++					j.w.EndArray();
++					j.w.EndObject();
++				}
++				j.w.EndArray();
++				j.K("settings");
++				j.w.StartObject();
++				j.KI("delay", s.delay);
++				j.KI("hashEvery", s.hashEvery);
++				j.KS("cpu", s.cpu);
++				j.KB("shareSave", s.shareSave);
++				j.w.EndObject();
++				j.K("desync");
++				if (s.desync)
++				{
++					j.w.StartObject();
++					j.KI("tick", s.desyncTick);
++					j.KS("region", s.desyncRegion);
++					j.w.EndObject();
++				}
++				else
++					j.w.Null();
++				j.K("lab");
++				j.w.StartObject();
++				j.KS("phase", s.lab.phase);
++				j.KS("titleId", s.lab.titleId);
++				j.KI("seconds", s.lab.seconds);
++				j.KI("ticks", s.lab.ticks);
++				{
++					std::ifstream f(LabDir() / "result.json");
++					std::string t((std::istreambuf_iterator<char>(f)), {});
++					rapidjson::Document d;
++					d.Parse(t.c_str());
++					j.K("result");
++					if (d.IsObject())
++						j.w.RawValue(t.c_str(), t.size(), rapidjson::kObjectType);
++					else
++						j.w.Null();
++				}
++				j.w.EndObject();
++				j.K("live");
++				j.w.StartObject();
++				j.KI("tick", s.liveTick);
++				j.KS("waitingFor", s.waitingFor);
++				j.KI("stalls", s.liveStalls);
++				j.KI("impure", s.liveImpure);
++				j.KI("pingMs", -1);
++				j.w.EndObject();
++				j.K("log");
++				j.w.StartArray();
++				for (auto& t : s.log)
++					j.S(t);
++				j.w.EndArray();
++				j.w.EndObject();
++			}
++		} // namespace
++	} // namespace Net
++
++	void Init(const std::string& dataDir)
++	{
++		Net::s.dataDir = dataDir;
++		Net::RestorePending();
++		// lab phase after a restart
++		std::error_code ec;
++		if (stdfs::exists(Net::LabDir() / "meta.json", ec))
++			Net::LabLoadMeta();
++	}
++} // namespace Lockstep
++
++namespace ControlApi
++{
++	HttpResponse HandleLock(const HttpRequest& req, const std::string& sub)
++	{
++		using namespace Lockstep::Net;
++		auto status = [&]() {
++			Json j;
++			WriteStatus(j);
++			return Ok(j);
++		};
++		if (sub.empty() || sub == "/status")
++			return status();
++		if (req.method != "POST")
++			return Err(405, "POST expected");
++		rapidjson::Document d;
++		if (!req.body.empty() && !ParseBody(req, d))
++			return Err(400, "invalid json");
++		if (!d.IsObject())
++			d.SetObject();
++
++		if (sub == "/host/start")
++		{
++			std::scoped_lock l(s.m);
++			if (!s.role.empty())
++				return Err(409, "already in a session");
++			if (s.lab.mode != Mode::Off)
++				return Err(409, "a lab run is active");
++			s.stop = false;
++			s.error.clear();
++			s.name = GetStr(d, "name", "Host");
++			if (s.name.empty())
++				s.name = "Host";
++			s.code = RandomCode();
++			s.role = "host";
++			s.state = "idle";
++			s.slot = 0;
++			s.nPlayers = 1;
++			s.titleId.clear();
++			s.manifestJson.clear();
++			s.desync = false;
++			s.log.clear();
++			try
++			{
++				s.acc.reset(new tcp::acceptor(s.io, tcp::endpoint(tcp::v4(), kPort)));
++				s.acc->set_option(asio::socket_base::reuse_address(true));
++			}
++			catch (const std::exception& e)
++			{
++				s.role.clear();
++				return Err(500, std::string("Could not open port 17810: ") + e.what());
++			}
++			if (s.accThread.joinable())
++				s.accThread.join();
++			s.accThread = std::thread(AcceptLoop);
++			if (s.pinger.joinable())
++				s.pinger.join();
++			s.pinger = std::thread(PingLoop);
++			RebuildRosterLocked(s.name);
++			LogLocked("Hosting with code " + s.code);
++			return status();
++		}
++		if (sub == "/host/stop" || sub == "/leave")
++		{
++			{
++				std::scoped_lock l(s.m);
++				if (s.state == "running")
++					return Err(409, "a game is running");
++				StopAllLocked();
++			}
++			if (s.accThread.joinable())
++				s.accThread.join();
++			if (s.pinger.joinable())
++				s.pinger.join();
++			return status();
++		}
++		if (sub == "/join")
++		{
++			const std::string host = GetStr(d, "host"), code = GetStr(d, "code"), name = GetStr(d, "name", "Guest");
++			{
++				std::scoped_lock l(s.m);
++				if (!s.role.empty())
++					return Err(409, "already in a session");
++				s.stop = false;
++				s.error.clear();
++			}
++			auto c = std::make_shared<Conn>(s.io);
++			try
++			{
++				tcp::resolver rs(s.io);
++				boost::system::error_code ec;
++				auto eps = rs.resolve(host, std::to_string(kPort), ec);
++				if (ec)
++					return Err(502, "Could not find that address.");
++				// short connect timeout
++				c->sock.non_blocking(true, ec);
++				bool ok = false;
++				for (auto& ep : eps)
++				{
++					c->sock.close(ec);
++					c->sock.open(ep.endpoint().protocol(), ec);
++					c->sock.non_blocking(true, ec);
++					c->sock.connect(ep.endpoint(), ec);
++					if (!ec || ec == asio::error::in_progress || ec == asio::error::would_block)
++					{
++						const auto t0 = NowMs();
++						while (NowMs() - t0 < 4000)
++						{
++							boost::system::error_code e2;
++							c->sock.connect(ep.endpoint(), e2);
++							if (!e2 || e2 == asio::error::already_connected)
++							{
++								ok = true;
++								break;
++							}
++							std::this_thread::sleep_for(std::chrono::milliseconds(30));
++						}
++					}
++					if (ok)
++						break;
++				}
++				c->sock.non_blocking(false, ec);
++				if (!ok)
++					return Err(502, "Could not reach the host. Check the address and that you are on the same network.");
++				c->sock.set_option(tcp::no_delay(true), ec);
++			}
++			catch (const std::exception& e)
++			{
++				return Err(502, std::string("Connection failed: ") + e.what());
++			}
++			Json h;
++			h.w.StartObject();
++			h.KS("magic", "NEBLOCK1");
++			h.KS("code", code);
++			h.KS("name", name);
++			h.KS("build", AppVersion());
++			h.w.EndObject();
++			c->Send(HELLO, h.sb.GetString());
++			uint8_t t;
++			std::string p;
++			if (!c->Recv(t, p) || t != WELCOME)
++			{
++				c->Close();
++				return Err(502, "The host did not answer.");
++			}
++			rapidjson::Document w;
++			w.Parse(p.c_str());
++			if (!w.IsObject() || !w["ok"].GetBool())
++			{
++				c->Close();
++				return Err(403, w.IsObject() && w.HasMember("msg") ? w["msg"].GetString() : "Refused.");
++			}
++			{
++				std::scoped_lock l(s.m);
++				s.role = "guest";
++				s.state = "idle";
++				s.slot = w["slot"].GetInt();
++				s.name = name;
++				s.hostAddr = host;
++				s.up = c;
++				s.titleId.clear();
++				s.manifestJson.clear();
++				s.desync = false;
++				s.log.clear();
++				for (auto& g : s.gone)
++					g = false;
++				LogLocked("Joined " + host + " as player " + std::to_string(s.slot + 1));
++			}
++			std::thread(GuestLoop, c).detach();
++			return status();
++		}
++		if (sub == "/host/pick")
++		{
++			const std::string id = GetStr(d, "titleId");
++			if (id.empty())
++				return Err(400, "no game");
++			std::string err;
++			const std::string man = BuildManifest(id, &err);
++			if (!err.empty())
++				return Err(409, err);
++			std::scoped_lock l(s.m);
++			if (s.role != "host" || s.state == "running")
++				return Err(409, "not hosting");
++			s.titleId = id;
++			s.manifestJson = man;
++			for (auto& g : s.guests)
++			{
++				g->ready = false;
++				g->problems.clear();
++			}
++			BroadcastRosterLocked();
++			return status();
++		}
++		if (sub == "/host/settings")
++		{
++			std::scoped_lock l(s.m);
++			if (s.role != "host" || s.state == "running")
++				return Err(409, "not available now");
++			if (Has(d, "delay"))
++				s.delay = (int)std::max<int64_t>(0, std::min<int64_t>(12, GetInt(d, "delay")));
++			if (Has(d, "hashEvery"))
++				s.hashEvery = (int)std::max<int64_t>(5, std::min<int64_t>(120, GetInt(d, "hashEvery")));
++			if (Has(d, "cpu"))
++				s.cpu = GetStr(d, "cpu") == "interpreter" ? "interpreter" : "recompiler";
++			if (Has(d, "shareSave"))
++				s.shareSave = GetBool(d, "shareSave", true);
++			BroadcastRosterLocked();
++			return status();
++		}
++		if (sub == "/host/launch")
++		{
++			std::scoped_lock l(s.m);
++			if (s.role != "host" || s.titleId.empty())
++				return Err(409, "choose a game first");
++			if (s.state == "running")
++				return Err(409, "already running");
++			for (auto& g : s.guests)
++				if (!g->problems.empty() || !g->ready)
++					return Err(409, g->name + " is not ready (see Players & game)");
++			std::string err;
++			BuildManifest(s.titleId, &err);
++			if (!err.empty())
++				return Err(409, err);
++			const int delay = s.delay > 0 ? s.delay : AutoDelay();
++			const uint64_t now = (uint64_t)time(nullptr);
++			if (s.shareSave && !s.guests.empty())
++			{
++				std::string pack;
++				if (!PackDir(SaveDir(s.titleId), pack))
++					return Err(413, "The save is too large to share.");
++				for (auto& g : s.guests)
++					g->Send(SAVE, pack);
++			}
++			const int players = (int)s.guests.size() + 1;
++			Json j;
++			j.w.StartObject();
++			j.KI("unix", (int64_t)now);
++			j.KI("delay", delay);
++			j.KI("hashEvery", s.hashEvery);
++			j.KS("cpu", s.cpu);
++			j.KI("players", players);
++			j.KS("titleId", s.titleId);
++			j.w.EndObject();
++			for (auto& g : s.guests)
++				g->Send(START, j.sb.GetString());
++			s.nPlayers = players;
++			BeginGameLocked(std::to_string(now), delay, s.hashEvery, s.cpu, players, s.titleId, false);
++			return status();
++		}
++		if (sub == "/lab/record" || sub == "/lab/replay")
++		{
++			std::scoped_lock l(s.m);
++			if (!s.role.empty())
++				return Err(409, "leave the session first");
++			if (s.state == "running" || s.lab.mode != Mode::Off)
++				return Err(409, "a game is running");
++			std::string id = GetStr(d, "titleId");
++			const bool rec = sub == "/lab/record";
++			if (!rec)
++			{
++				LabLoadMeta();
++				id = s.lab.titleId;
++				if (s.lab.phase != "recorded")
++					return Err(409, "record a run first");
++			}
++			if (id.empty())
++				return Err(400, "choose a game");
++			std::string err;
++			BuildManifest(id, &err);
++			if (!err.empty())
++				return Err(409, err);
++			s.state = "running";
++			LabStart(id, rec, (int)GetInt(d, "seconds", 60));
++			std::thread([id] {
++				std::string e;
++				if (!ControlApi::LaunchTitle(id, e))
++				{
++					std::scoped_lock l2(s.m);
++					s.error = e;
++					s.state = "idle";
++					s.lab.mode = Mode::Off;
++					Lockstep::g_active = false;
++				}
++			}).detach();
++			return status();
++		}
++		if (sub == "/lab/reset")
++		{
++			std::scoped_lock l(s.m);
++			if (s.state == "running")
++				return Err(409, "a game is running");
++			std::error_code ec;
++			stdfs::remove_all(LabDir(), ec);
++			s.lab = LabState{};
++			return status();
++		}
++		return Err(404, "unknown route");
++	}
++} // namespace ControlApi
 diff --git a/src/gui/sdlgui/SdlKeys.h b/src/gui/sdlgui/SdlKeys.h
 new file mode 100644
 index 0000000..bb3afe8
@@ -4703,10 +7132,10 @@ index 0000000..bb3afe8
 +} // namespace SdlKeys
 diff --git a/src/gui/sdlgui/SdlWindowSystem.cpp b/src/gui/sdlgui/SdlWindowSystem.cpp
 new file mode 100644
-index 0000000..9115f17
+index 0000000..52cd222
 --- /dev/null
 +++ b/src/gui/sdlgui/SdlWindowSystem.cpp
-@@ -0,0 +1,860 @@
+@@ -0,0 +1,863 @@
 +// NEBULATOR core front end.
 +//
 +// Replaces Cemu's wxWidgets GUI with one SDL3 window. It implements the WindowSystem interface that the
@@ -4719,6 +7148,7 @@ index 0000000..9115f17
 +// UNTESTED: written against Cemu's source without being able to compile or run it. Expect build errors.
 +
 +#include "WindowSystem.h"
++#include "Lockstep.h"
 +
 +#include "config/ActiveSettings.h"
 +#include "config/CemuConfig.h"
@@ -5291,6 +7721,7 @@ index 0000000..9115f17
 +
 +	void RelaunchMenu()
 +	{
++		Lockstep::GameStopped();
 +		g_server.Stop();
 +		SDL_setenv_unsafe("NEBULATOR_RELAUNCH", "1", 1);
 +		const std::string exe = SelfExePath();
@@ -5390,6 +7821,7 @@ index 0000000..9115f17
 +		};
 +		const fs::path uiDir = ActiveSettings::GetDataPath("ui");
 +		ControlApi::Init(std::move(cb), LoadOrCreateToken(), uiDir);
++		Lockstep::Init({});
 +	}
 +} // namespace
 +

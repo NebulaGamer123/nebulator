@@ -206,7 +206,7 @@
         h('button', { class: 'btn', disabled: !idle || lab.phase === 'none', onclick: () => lkPost('lab/reset') }, 'Clear')),
       lab.phase !== 'none' ? h('p', { class: 'lead' }, lab.phase === 'recorded'
         ? 'Recorded ' + (lab.ticks || 0) + ' frames of ' + gameName(lab.titleId) + '. Press “Replay and compare” next.'
-        : 'Replayed ' + gameName(lab.titleId) + '.') : null,
+        : 'Run in progress or unfinished for ' + gameName(lab.titleId) + '. Close the game to see the result.') : null,
       res ? h('div', { class: 'cp-result ' + (res.identical ? 'ok' : 'bad') },
         h('b', null, res.identical ? 'Identical: both runs matched on every check.' : 'The runs drifted apart.'),
         h('span', null, res.identical
