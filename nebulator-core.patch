@@ -514,7 +514,7 @@ index b697cec..ed1d95e 100644
  	{
  		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::relaxed);
 diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
-index 9fe4bea..51cf484 100644
+index 9fe4bea..c01f9f9 100644
 --- a/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
 +++ b/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
 @@ -1,4 +1,5 @@
@@ -540,17 +540,28 @@ index 9fe4bea..51cf484 100644
  	}
  
  	OSThread_t* __OSGetNextRunableThread(uint32 coreIndex)
-@@ -1233,6 +1237,8 @@ namespace coreinit
+@@ -1233,11 +1237,16 @@ namespace coreinit
  
  	void __OSCheckSystemEvents()
  	{
 +		if (Lockstep::Active())
 +			Lockstep::OnSystemEvents();
  		// AX update
++		if (Lockstep::Active()) Lockstep::DbgWhere("AXOut_update");
  		snd_core::AXOut_update();
  		// alarm update
-@@ -1261,8 +1267,12 @@ namespace coreinit
++		if (Lockstep::Active()) Lockstep::DbgWhere("alarm_update");
+ 		coreinit::alarm_update();
+ 		// nfp update
++		if (Lockstep::Active()) Lockstep::DbgWhere("nnNfp_update");
+ 		nnNfp_update();
+ 	}
+ 
+@@ -1259,10 +1268,15 @@ namespace coreinit
+ 				if (nextThread)
+ 				{
  					cemu_assert_debug(nextThread->state == OSThread_t::THREAD_STATE::STATE_RUNNING);
++					if (Lockstep::Active()) Lockstep::DbgWhere("switching to guest thread");
  					__OSSwitchToThreadFiber(nextThread, coreIndex);
  				}
 +				else if (Lockstep::Active())
@@ -4925,10 +4936,10 @@ index 0000000..7f6a410
 +#endif
 diff --git a/src/gui/sdlgui/Lockstep.h b/src/gui/sdlgui/Lockstep.h
 new file mode 100644
-index 0000000..fe8221d
+index 0000000..809aa2a
 --- /dev/null
 +++ b/src/gui/sdlgui/Lockstep.h
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,87 @@
 +#pragma once
 +// Lockstep netplay engine (experimental).
 +// Every player runs the game locally; only controller inputs are exchanged. For that to work the emulation must behave
@@ -4961,6 +4972,7 @@ index 0000000..fe8221d
 +	uint64_t VirtualCycles();
 +	void SliceBegin(int32_t startRemaining); // a PPC thread got a timeslice
 +	void SliceEnd(int32_t remainingNow); // the timeslice ended
++	void DbgWhere(const char* where); // diagnostics: which step the scheduler is in (string literal)
 +	void IdleStep(); // nothing runnable: let time pass
 +	void OnSystemEvents(); // main core idle loop, scheduler lock NOT held: runs the per-tick protocol
 +	bool UseAudioClock(uint64_t& nextAxCycles); // AX: true when a 3 ms virtual interval elapsed
@@ -5017,10 +5029,10 @@ index 0000000..fe8221d
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepCore.cpp b/src/gui/sdlgui/LockstepCore.cpp
 new file mode 100644
-index 0000000..d9679a5
+index 0000000..6d0d66d
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepCore.cpp
-@@ -0,0 +1,591 @@
+@@ -0,0 +1,628 @@
 +// Lockstep engine, CPU/GPU/IOSU side. See Lockstep.h for the overall idea.
 +#include "Lockstep.h"
 +#include "CoopRemote.h"
@@ -5031,6 +5043,7 @@ index 0000000..d9679a5
 +#include "Cafe/HW/MMU/MMU.h"
 +#include "Cafe/HW/Latte/Core/Latte.h"
 +#include "Cafe/OS/libs/coreinit/coreinit_IPC.h"
++#include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 +#include "input/InputManager.h"
 +#include "input/emulated/ProController.h"
 +#include "input/emulated/VPADController.h"
@@ -5093,6 +5106,10 @@ index 0000000..d9679a5
 +		// ---------------------------------------------------------------- diagnostics (watchdog thread + engine.log)
 +		std::atomic<uint64_t> g_dbgSys{0}, g_dbgIdle{0}, g_dbgSlices{0}, g_dbgWin{0}, g_dbgPoll{0};
 +		std::atomic<uint32_t> g_dbgTick{0};
++	std::atomic<const char*> g_dbgWhere{"boot"};
++	std::atomic<uint32_t> g_dbgThrEntry{0}, g_dbgThrPc{0}, g_dbgThrLr{0};
++	std::atomic<const char*> g_dbgThrName{""};
++	std::atomic<PPCInterpreter_t*> g_dbgCpu{nullptr};
 +		std::atomic<uint64_t> g_dbgCompiles{0}, g_dbgCompileUs{0};
 +		std::atomic<bool> g_dbgRun{false};
 +		std::thread g_dbgThread;
@@ -5312,7 +5329,9 @@ index 0000000..d9679a5
 +		{
 +			const uint32_t N = g_tick;
 +			const auto mode = Net::GetMode();
++			DbgWhere("tick: pace");
 +			Pace();
++			DbgWhere("tick: input");
 +
 +			PadState all[kMaxPlayers];
 +			const PadState local = Sample();
@@ -5340,9 +5359,13 @@ index 0000000..d9679a5
 +				if (g_pads[i])
 +					g_pads[i]->Set(all[i].buttons, all[i].lx, all[i].ly, all[i].rx, all[i].ry);
 +
++			DbgWhere("tick: deliver ipc");
 +			DeliverIpc();
++			DbgWhere("tick: signal vsync");
 +			LatteTiming_signalVsync();
++			DbgWhere("tick: gpu window");
 +			GpuWindow();
++			DbgWhere("tick: hash/stats");
 +
 +			const int every = std::max(1, Net::HashEvery());
 +			if (N > 0 && (N % (uint32_t)every) == 0)
@@ -5356,6 +5379,7 @@ index 0000000..d9679a5
 +			if ((N & 15) == 0)
 +				Net::Stats(N, g_stalls, g_impure, "");
 +			g_tick++;
++			DbgWhere("tick done");
 +		}
 +	} // namespace
 +
@@ -5379,7 +5403,21 @@ index 0000000..d9679a5
 +		g_dbgSlices.fetch_add(1, std::memory_order_relaxed);
 +		g_sliceStart = startRemaining;
 +		g_inSlice = true;
++		DbgWhere("guest slice");
++		if (auto* cpu = PPCInterpreter_getCurrentInstance())
++		{
++			g_dbgCpu.store(cpu, std::memory_order_relaxed);
++			g_dbgThrPc.store(cpu->instructionPointer, std::memory_order_relaxed);
++			g_dbgThrLr.store(cpu->spr.LR, std::memory_order_relaxed);
++		}
++		if (auto* t = coreinit::OSGetCurrentThread())
++		{
++			g_dbgThrEntry.store((uint32_t)t->entrypoint.GetMPTR(), std::memory_order_relaxed);
++			g_dbgThrName.store(t->threadName ? (const char*)t->threadName.GetPtr() : "", std::memory_order_relaxed);
++		}
 +	}
++
++	void DbgWhere(const char* where) { g_dbgWhere.store(where, std::memory_order_relaxed); }
 +
 +	void SliceEnd(int32_t remainingNow)
 +	{
@@ -5393,6 +5431,7 @@ index 0000000..d9679a5
 +
 +	void IdleStep()
 +	{
++		DbgWhere("idle step");
 +		g_dbgIdle.fetch_add(1, std::memory_order_relaxed);
 +		g_cycNum.fetch_add(kIdleStep * kCpuShare, std::memory_order_relaxed);
 +	}
@@ -5413,6 +5452,7 @@ index 0000000..d9679a5
 +
 +	void OnSystemEvents()
 +	{
++		DbgWhere("system events");
 +		g_dbgSys.fetch_add(1, std::memory_order_relaxed);
 +		if (!g_started)
 +		{
@@ -5541,6 +5581,15 @@ index 0000000..d9679a5
 +					g_epoch.load(), g_gpuSeen.load(), g_gpuLimit.load(), TCL::TCLGetRingReadIndex(), TCL::TCLGetRingWriteIndex(), (unsigned long long)(poll - pPoll), (unsigned long long)(win - pWin), ipc.c_str(), g_impure, g_stalls,
 +					(unsigned long long)VirtualCycles(), (unsigned long long)g_dbgCompiles.load(), (unsigned long long)(g_dbgCompileUs.load() / 1000));
 +				EngineLog(buf, false);
++				if (sys == pSys)
++				{
++					char w[400];
++					uint32_t curPc = 0, curLr = 0;
++					if (auto* c = g_dbgCpu.load()) { curPc = c->instructionPointer; curLr = c->spr.LR; }
++					snprintf(w, sizeof(w), "   stuck-in: %s | last guest thread '%s' entry=%08x slicePC=%08x sliceLR=%08x | now PC=%08x LR=%08x",
++						g_dbgWhere.load(), g_dbgThrName.load(), g_dbgThrEntry.load(), g_dbgThrPc.load(), g_dbgThrLr.load(), curPc, curLr);
++					EngineLog(w, false);
++				}
 +				if (sys == pSys)
 +				{
 +					stalledSecs++;
