@@ -5073,10 +5073,10 @@ index 0000000..809aa2a
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepCore.cpp b/src/gui/sdlgui/LockstepCore.cpp
 new file mode 100644
-index 0000000..b5ff350
+index 0000000..673c9a8
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepCore.cpp
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,707 @@
 +// Lockstep engine, CPU/GPU/IOSU side. See Lockstep.h for the overall idea.
 +#include "Lockstep.h"
 +#include "CoopRemote.h"
@@ -5087,6 +5087,7 @@ index 0000000..b5ff350
 +#include "Cafe/HW/MMU/MMU.h"
 +#include "Cafe/HW/Latte/Core/Latte.h"
 +#include "Cafe/HW/Latte/Core/LatteAsyncCommands.h"
++#include "Cafe/HW/Latte/Core/LatteTiming.h"
 +#include "Cafe/OS/libs/coreinit/coreinit_IPC.h"
 +#include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 +#include "input/InputManager.h"
@@ -5127,7 +5128,10 @@ index 0000000..b5ff350
 +		using Clock = std::chrono::steady_clock;
 +		constexpr uint64_t kCoreClock = Espresso::CORE_CLOCK;
 +		// one tick = one vsync = 1001/60000 s of virtual time
-+		constexpr uint64_t kTickCycles = kCoreClock * 1001ull / 60000ull;
++		// tick rate: 59.94 Hz unless the game's graphics pack asks for another vsync frequency (e.g. an FPS pack set to 120)
++		uint64_t g_tickCycles = kCoreClock * 1001ull / 60000ull;
++		std::chrono::nanoseconds g_tickPeriod(1000000000ll * kTicksPerSecondDen / kTicksPerSecondNum);
++		int32_t g_tickHz = 0;
 +		constexpr uint64_t kIdleStep = kCoreClock / 10000ull; // 0.1 ms
 +		constexpr uint64_t kCpuShare = 3; // three emulated cores take turns on one host thread
 +
@@ -5350,7 +5354,7 @@ index 0000000..b5ff350
 +			const uint32_t phase = (tick / (uint32_t)std::max(1, Net::HashEvery())) % 16;
 +			const uint8_t* mem = memory_getPointerFromVirtualOffset(base);
 +			r.chunks.resize((size_t)chunks * 4);
-+			uint64_t total = Mix(0x1234567ull, VirtualCycles());
++			uint64_t total = Mix(Mix(0x1234567ull, (uint64_t)g_tickHz), VirtualCycles());
 +			for (uint32_t c = 0; c < chunks; c++)
 +			{
 +				// four independent lanes so the CPU can overlap the multiplies (the hash used to cost a visible hitch)
@@ -5403,7 +5407,7 @@ index 0000000..b5ff350
 +
 +		void Pace()
 +		{
-+			const auto period = std::chrono::nanoseconds(1000000000ll * kTicksPerSecondDen / kTicksPerSecondNum);
++			const auto period = g_tickPeriod;
 +			g_deadline += period;
 +			const auto now = Clock::now();
 +			if (g_deadline > now)
@@ -5546,14 +5550,28 @@ index 0000000..b5ff350
 +			g_started = true;
 +			AttachPads();
 +			g_deadline = Clock::now();
-+			g_nextTickV = VirtualCycles() + kTickCycles;
++			sint32 hz = 0;
++			if (LatteTiming_getCustomVsyncFrequency(hz) && hz >= 30 && hz <= 360)
++			{
++				g_tickHz = hz;
++				g_tickCycles = kCoreClock / (uint64_t)hz;
++				g_tickPeriod = std::chrono::nanoseconds(1000000000ll / hz);
++				EngineLog("Graphics pack asked for " + std::to_string(hz) + " Hz: ticks now run at " + std::to_string(hz) + " per second (every player must use the same FPS setting)", true);
++			}
++			else
++			{
++				g_tickHz = 0;
++				g_tickCycles = kCoreClock * 1001ull / 60000ull;
++				g_tickPeriod = std::chrono::nanoseconds(1000000000ll * kTicksPerSecondDen / kTicksPerSecondNum);
++			}
++			g_nextTickV = VirtualCycles() + g_tickCycles;
 +			EngineLog("First system event reached: the game's CPU scheduler is running", false);
 +			Net::Log("Lockstep started (" + std::to_string(Net::PlayerCount()) + " player(s), delay " + std::to_string(Net::InputDelay()) + " frames)");
 +			return;
 +		}
 +		if (VirtualCycles() < g_nextTickV)
 +			return;
-+		g_nextTickV += kTickCycles;
++		g_nextTickV += g_tickCycles;
 +		g_dbgTick.store(g_tick, std::memory_order_relaxed);
 +		DoTick();
 +	}
