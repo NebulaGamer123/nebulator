@@ -5073,10 +5073,10 @@ index 0000000..809aa2a
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepCore.cpp b/src/gui/sdlgui/LockstepCore.cpp
 new file mode 100644
-index 0000000..5c942c1
+index 0000000..db3a4d1
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepCore.cpp
-@@ -0,0 +1,641 @@
+@@ -0,0 +1,647 @@
 +// Lockstep engine, CPU/GPU/IOSU side. See Lockstep.h for the overall idea.
 +#include "Lockstep.h"
 +#include "CoopRemote.h"
@@ -5086,6 +5086,7 @@ index 0000000..5c942c1
 +#include "Cafe/HW/Espresso/Const.h"
 +#include "Cafe/HW/MMU/MMU.h"
 +#include "Cafe/HW/Latte/Core/Latte.h"
++#include "Cafe/HW/Latte/Core/LatteAsyncCommands.h"
 +#include "Cafe/OS/libs/coreinit/coreinit_IPC.h"
 +#include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 +#include "input/InputManager.h"
@@ -5534,7 +5535,12 @@ index 0000000..5c942c1
 +			return;
 +		}
 +		while (Active() && !g_gpuUngated.load(std::memory_order_relaxed) && g_epoch.load(std::memory_order_acquire) == e && !Latte_GetStopSignal())
++		{
++			// the game may be blocked inside a synchronous GX2 call (e.g. GX2CopySurface on the CPU path) that waits for
++			// this thread to run async commands; the next tick cannot happen until it returns, so keep serving them while parked
++			LatteAsyncCommands_checkAndExecute();
 +			std::this_thread::sleep_for(std::chrono::microseconds(20));
++		}
 +		g_gpuPrev = g_epoch.load(std::memory_order_acquire);
 +	}
 +
