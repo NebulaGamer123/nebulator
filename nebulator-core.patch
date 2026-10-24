@@ -5073,10 +5073,10 @@ index 0000000..809aa2a
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepCore.cpp b/src/gui/sdlgui/LockstepCore.cpp
 new file mode 100644
-index 0000000..673c9a8
+index 0000000..511e92b
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepCore.cpp
-@@ -0,0 +1,707 @@
+@@ -0,0 +1,722 @@
 +// Lockstep engine, CPU/GPU/IOSU side. See Lockstep.h for the overall idea.
 +#include "Lockstep.h"
 +#include "CoopRemote.h"
@@ -5088,6 +5088,7 @@ index 0000000..673c9a8
 +#include "Cafe/HW/Latte/Core/Latte.h"
 +#include "Cafe/HW/Latte/Core/LatteAsyncCommands.h"
 +#include "Cafe/HW/Latte/Core/LatteTiming.h"
++#include "Cafe/GraphicPack/GraphicPack2.h"
 +#include "Cafe/OS/libs/coreinit/coreinit_IPC.h"
 +#include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 +#include "input/InputManager.h"
@@ -5566,6 +5567,20 @@ index 0000000..673c9a8
 +			}
 +			g_nextTickV = VirtualCycles() + g_tickCycles;
 +			EngineLog("First system event reached: the game's CPU scheduler is running", false);
++			{
++				// which graphics packs are really active in this session, and with which settings
++				const auto& act = GraphicPack2::GetActiveGraphicPacks();
++				EngineLog("Active graphics packs: " + std::to_string(act.size()), false);
++				for (const auto& gp : act)
++				{
++					std::string line = "  pack '" + gp->GetVirtualPath() + "'";
++					for (const auto& pr : gp->GetActivePresets())
++						line += " [" + (pr->category.empty() ? std::string("default") : pr->category) + " = " + pr->name + "]";
++					if (gp->HasCustomVSyncFrequency())
++						line += " vsync=" + std::to_string(gp->GetCustomVSyncFrequency()) + "Hz";
++					EngineLog(line, false);
++				}
++			}
 +			Net::Log("Lockstep started (" + std::to_string(Net::PlayerCount()) + " player(s), delay " + std::to_string(Net::InputDelay()) + " frames)");
 +			return;
 +		}
