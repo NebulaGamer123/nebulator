@@ -152,6 +152,38 @@ index 6e6504a..acfd66b 100644
  			coreinit::OSSchedulerBegin(3);
  		else
  			coreinit::OSSchedulerBegin(1);
+diff --git a/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterHLE.cpp b/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterHLE.cpp
+index cf7ba19..832ebea 100644
+--- a/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterHLE.cpp
++++ b/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterHLE.cpp
+@@ -19,6 +19,7 @@ void PPCInterpreter_handleUnsupportedHLECall(PPCInterpreter_t* hCPU)
+ 
+ static constexpr size_t HLE_TABLE_CAPACITY = 0x4000;
+ HLECALL s_ppcHleTable[HLE_TABLE_CAPACITY]{};
++std::string s_ppcHleNames[HLE_TABLE_CAPACITY];
+ sint32 s_ppcHleTableWriteIndex = 0;
+ std::mutex s_ppcHleTableMutex;
+ 
+@@ -39,11 +40,19 @@ HLEIDX PPCInterpreter_registerHLECall(HLECALL hleCall, std::string hleName)
+ 	}
+ 	cemu_assert(s_ppcHleTableWriteIndex < HLE_TABLE_CAPACITY);
+ 	s_ppcHleTable[s_ppcHleTableWriteIndex] = hleCall;
++	s_ppcHleNames[s_ppcHleTableWriteIndex] = hleName;
+ 	HLEIDX funcIndex = s_ppcHleTableWriteIndex;
+ 	s_ppcHleTableWriteIndex++;
+ 	return funcIndex;
+ }
+ 
++std::string PPCInterpreter_getHLEName(HLEIDX funcIndex)
++{
++	if (funcIndex < 0 || funcIndex >= HLE_TABLE_CAPACITY)
++		return "?";
++	return s_ppcHleNames[funcIndex];
++}
++
+ HLECALL PPCInterpreter_getHLECall(HLEIDX funcIndex)
+ {
+ 	if (funcIndex < 0 || funcIndex >= HLE_TABLE_CAPACITY)
 diff --git a/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterMain.cpp b/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterMain.cpp
 index 4449f13..2aec1b4 100644
 --- a/src/Cafe/HW/Espresso/Interpreter/PPCInterpreterMain.cpp
@@ -170,6 +202,18 @@ index 4449f13..2aec1b4 100644
 +		return Lockstep::VirtualCycles();
  	return PPCTimer_getFromRDTSC();
  }
+ 
+diff --git a/src/Cafe/HW/Espresso/PPCState.h b/src/Cafe/HW/Espresso/PPCState.h
+index fd943d3..b216546 100644
+--- a/src/Cafe/HW/Espresso/PPCState.h
++++ b/src/Cafe/HW/Espresso/PPCState.h
+@@ -235,6 +235,7 @@ using HLEIDX = sint32;
+ 
+ HLEIDX PPCInterpreter_registerHLECall(HLECALL hleCall, std::string hleName);
+ HLECALL PPCInterpreter_getHLECall(HLEIDX funcIndex);
++std::string PPCInterpreter_getHLEName(HLEIDX funcIndex);
+ 
+ // HLE scheduler
  
 diff --git a/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp b/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp
 index 6be50ec..e33d623 100644
@@ -5029,10 +5073,10 @@ index 0000000..809aa2a
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepCore.cpp b/src/gui/sdlgui/LockstepCore.cpp
 new file mode 100644
-index 0000000..6d0d66d
+index 0000000..5c942c1
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepCore.cpp
-@@ -0,0 +1,628 @@
+@@ -0,0 +1,641 @@
 +// Lockstep engine, CPU/GPU/IOSU side. See Lockstep.h for the overall idea.
 +#include "Lockstep.h"
 +#include "CoopRemote.h"
@@ -5589,6 +5633,19 @@ index 0000000..6d0d66d
 +					snprintf(w, sizeof(w), "   stuck-in: %s | last guest thread '%s' entry=%08x slicePC=%08x sliceLR=%08x | now PC=%08x LR=%08x",
 +						g_dbgWhere.load(), g_dbgThrName.load(), g_dbgThrEntry.load(), g_dbgThrPc.load(), g_dbgThrLr.load(), curPc, curLr);
 +					EngineLog(w, false);
++					if (auto* c = g_dbgCpu.load())
++					{
++						std::string hle = "(not an HLE stub)";
++						const uint32_t pc = c->instructionPointer;
++						if (pc >= 0x00010000 && pc < 0xE0000000)
++						{
++							const uint32_t op = memory_readU32(pc);
++							if ((op >> 26) == 1)
++								hle = PPCInterpreter_getHLEName((HLEIDX)(op & 0xFFFF));
++						}
++						snprintf(w, sizeof(w), "   blocked in host function: %s | r3=%08x r4=%08x r5=%08x r6=%08x", hle.c_str(), c->gpr[3], c->gpr[4], c->gpr[5], c->gpr[6]);
++						EngineLog(w, false);
++					}
 +				}
 +				if (sys == pSys)
 +				{
