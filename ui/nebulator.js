@@ -555,7 +555,9 @@
       step(dt);
       if (pos !== prevPos || vel !== 0) { paint(); prevPos = pos; }
     }
-    pollPad(); dust(dt);
+    pollPad();
+    // the background haze is pure decoration: do not spend GPU on it while a game is running or the window is hidden
+    if (!document.hidden && (NEB.state === 'ui' || !NEB.state)) dust(dt);
     requestAnimationFrame(frame);
   }
 

@@ -52,7 +52,7 @@ input[type="text"].search { max-width: 280px; }
 /* ───────── modal ───────── */
 .modal { position: fixed; inset: 0; z-index: 50; display: none; place-items: center; }
 .modal.show { display: grid; }
-.mback { position: absolute; inset: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(3px); animation: fade .25s both; }
+.mback { position: absolute; inset: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); animation: fade .25s both; }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 .mbox { position: relative; width: min(460px, 92vw); max-height: 84vh; overflow: auto; padding: 26px; background: var(--bg2); border: 1px solid var(--line); border-radius: 4px; box-shadow: 8px 10px 0 var(--shadow); animation: rise2 .4s var(--ease) both; user-select: text; }
 .mbox.wide { width: min(620px, 94vw); }
@@ -74,7 +74,7 @@ input[type="text"].search { max-width: 280px; }
 .crow .cg { font: 11px var(--mono); color: var(--mute); }
 
 /* ───────── running overlay + offline chip ───────── */
-.running { position: fixed; inset: 0; z-index: 60; display: none; place-items: center; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(6px); }
+.running { position: fixed; inset: 0; z-index: 60; display: none; place-items: center; background: color-mix(in srgb, var(--bg) 88%, transparent); }
 .running.show { display: grid; animation: fade .3s both; }
 .run-card { text-align: center; max-width: 420px; padding: 24px; }
 .run-led { width: 12px; height: 12px; margin: 0 auto 18px; border-radius: 50%; background: var(--accent); animation: breathe 1.4s ease-in-out infinite; }
@@ -122,7 +122,7 @@ body.tint-on #tint { opacity: 1; }
 .si-b .btn { margin: 0; }
 .sky-info .btn.primary { background: var(--el); border-color: var(--el); color: #0b0b0b; transition: filter .2s; }
 .sky-info .btn.primary:hover { filter: brightness(1.12); background: var(--el); border-color: var(--el); color: #0b0b0b; }
-.sky-portal { display: flex; align-items: center; gap: 18px; padding: 14px 18px; border: 1px solid var(--line); border-radius: 4px; background: color-mix(in srgb, var(--bg2) 70%, transparent); backdrop-filter: blur(4px); }
+.sky-portal { display: flex; align-items: center; gap: 18px; padding: 14px 18px; border: 1px solid var(--line); border-radius: 4px; background: color-mix(in srgb, var(--bg2) 70%, transparent); }
 .sky-portal.off { opacity: .45; pointer-events: none; }
 .sky-portal .pl { font: 700 11px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--mute); }
 .pads { display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; flex: 1; }

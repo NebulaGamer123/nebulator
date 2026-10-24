@@ -5073,10 +5073,10 @@ index 0000000..809aa2a
 +} // namespace Lockstep
 diff --git a/src/gui/sdlgui/LockstepCore.cpp b/src/gui/sdlgui/LockstepCore.cpp
 new file mode 100644
-index 0000000..db3a4d1
+index 0000000..b5ff350
 --- /dev/null
 +++ b/src/gui/sdlgui/LockstepCore.cpp
-@@ -0,0 +1,647 @@
+@@ -0,0 +1,689 @@
 +// Lockstep engine, CPU/GPU/IOSU side. See Lockstep.h for the overall idea.
 +#include "Lockstep.h"
 +#include "CoopRemote.h"
@@ -5094,6 +5094,15 @@ index 0000000..db3a4d1
 +#include "input/emulated/VPADController.h"
 +#include "config/ActiveSettings.h"
 +#include <fstream>
++#ifdef _WIN32
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <Windows.h>
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++#endif
 +
 +#include <chrono>
 +#include <condition_variable>
@@ -5326,7 +5335,7 @@ index 0000000..db3a4d1
 +					}
 +					break;
 +				}
-+				std::this_thread::sleep_for(std::chrono::microseconds(15));
++				std::this_thread::yield(); // not sleep_for: a 15 us sleep takes up to 15 ms on Windows
 +			}
 +		}
 +
@@ -5344,13 +5353,20 @@ index 0000000..db3a4d1
 +			uint64_t total = Mix(0x1234567ull, VirtualCycles());
 +			for (uint32_t c = 0; c < chunks; c++)
 +			{
-+				uint64_t h = 0xCBF29CE484222325ull + c;
++				// four independent lanes so the CPU can overlap the multiplies (the hash used to cost a visible hitch)
++				uint64_t h0 = 0xCBF29CE484222325ull + c, h1 = h0 ^ 0x1111, h2 = h0 ^ 0x2222, h3 = h0 ^ 0x3333;
 +				for (uint32_t pg = phase; pg < 256; pg += 16)
 +				{
 +					const uint64_t* w = (const uint64_t*)(mem + ((size_t)c << 20) + (size_t)pg * 4096);
-+					for (int i = 0; i < 512; i++)
-+						h = Mix(h, w[i]);
++					for (int i = 0; i < 512; i += 4)
++					{
++						h0 = Mix(h0, w[i]);
++						h1 = Mix(h1, w[i + 1]);
++						h2 = Mix(h2, w[i + 2]);
++						h3 = Mix(h3, w[i + 3]);
++					}
 +				}
++				const uint64_t h = Mix(Mix(Mix(h0, h1), h2), h3);
 +				const uint32_t h32 = (uint32_t)(h ^ (h >> 32));
 +				memcpy(&r.chunks[(size_t)c * 4], &h32, 4);
 +				total = Mix(total, h32);
@@ -5359,13 +5375,39 @@ index 0000000..db3a4d1
 +			return r;
 +		}
 +
++		// Windows' normal sleep rounds up to ~15.6 ms, which made ticks arrive in uneven 15/31 ms steps (visible stutter).
++		// Use a high-resolution waitable timer for the bulk of the wait and finish with a short yield-spin.
++		void SleepUntilPrecise(Clock::time_point t)
++		{
++			using namespace std::chrono;
++#ifdef _WIN32
++			static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++			if (timer)
++			{
++				const auto rem = t - Clock::now();
++				if (rem > microseconds(1500))
++				{
++					LARGE_INTEGER due;
++					due.QuadPart = -(duration_cast<nanoseconds>(rem - microseconds(1000)).count() / 100);
++					if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
++						WaitForSingleObject(timer, INFINITE);
++				}
++			}
++#else
++			if (t - Clock::now() > milliseconds(2))
++				std::this_thread::sleep_until(t - milliseconds(1));
++#endif
++			while (Clock::now() < t)
++				std::this_thread::yield();
++		}
++
 +		void Pace()
 +		{
 +			const auto period = std::chrono::nanoseconds(1000000000ll * kTicksPerSecondDen / kTicksPerSecondNum);
 +			g_deadline += period;
 +			const auto now = Clock::now();
 +			if (g_deadline > now)
-+				std::this_thread::sleep_until(g_deadline);
++				SleepUntilPrecise(g_deadline);
 +			else if (now - g_deadline > std::chrono::milliseconds(200))
 +				g_deadline = now; // far behind (slow PC): do not try to catch up
 +		}
@@ -5413,7 +5455,7 @@ index 0000000..db3a4d1
 +			DbgWhere("tick: hash/stats");
 +
 +			const int every = std::max(1, Net::HashEvery());
-+			if (N > 0 && (N % (uint32_t)every) == 0)
++			if (N > 0 && (N % (uint32_t)every) == 0 && !(mode == Net::Mode::Session && Net::PlayerCount() <= 1))
 +			{
 +				HashReport h = ComputeHash(N);
 +				if (mode == Net::Mode::Session)
@@ -5539,7 +5581,7 @@ index 0000000..db3a4d1
 +			// the game may be blocked inside a synchronous GX2 call (e.g. GX2CopySurface on the CPU path) that waits for
 +			// this thread to run async commands; the next tick cannot happen until it returns, so keep serving them while parked
 +			LatteAsyncCommands_checkAndExecute();
-+			std::this_thread::sleep_for(std::chrono::microseconds(20));
++			std::this_thread::yield();
 +		}
 +		g_gpuPrev = g_epoch.load(std::memory_order_acquire);
 +	}
