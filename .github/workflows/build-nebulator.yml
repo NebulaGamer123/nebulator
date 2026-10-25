@@ -47,7 +47,8 @@ jobs:
           mkdir -p bin/ui
           cp -r ../overlay/ui/. bin/ui/
 
-      - name: Setup CMake
+      - name: Setup CMake (the runner already has one; this only pins the version, so a download hiccup must not fail the build)
+        continue-on-error: true
         uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: '3.29.0'
