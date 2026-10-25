@@ -504,7 +504,7 @@
   /* ───────── aurora: smooth drifting curtains (replaces the old pixel dither) ───────── */
   const cv = $('#dust'), cx = cv.getContext('2d'), W = 360, Hh = 200, COL = 3;
   cv.width = W; cv.height = Hh;
-  let bgT = 0, bgAcc = 0, bgShift = 0, bgDirty = true, ribbons = [], auroraA = 1;
+  let fadeG = null, bgT = 0, bgAcc = 0, bgShift = 0, bgDirty = true, ribbons = [], auroraA = 1;
   const hexRgb = hex => { const n = parseInt(hex.trim().slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
   // one vertical alpha profile per colour: transparent top, soft body, bright lower edge, fade out
   function profile(rgb) {
@@ -535,7 +535,12 @@
         cx.drawImage(ribbons[r], x, y - h * .8, COL + 1, h);
       }
     }
-    cx.globalAlpha = 1; cx.globalCompositeOperation = 'source-over';
+    // fade the lower part here, in the 360x200 canvas. A CSS mask over the full-screen layer cost far more than the whole animation
+    // on big monitors (2560x1440 dropped to ~20 fps in testing).
+    cx.globalAlpha = 1; cx.globalCompositeOperation = 'destination-in';
+    if (!fadeG) { fadeG = cx.createLinearGradient(0, 0, 0, Hh); fadeG.addColorStop(0, 'rgba(0,0,0,1)'); fadeG.addColorStop(.45, 'rgba(0,0,0,1)'); fadeG.addColorStop(1, 'rgba(0,0,0,.35)'); }
+    cx.fillStyle = fadeG; cx.fillRect(0, 0, W, Hh);
+    cx.globalCompositeOperation = 'source-over';
   }
   function dust(dt) {
     if (!S.dust) { cv.style.display = 'none'; return; }

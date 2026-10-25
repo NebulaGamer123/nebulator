@@ -43,7 +43,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 #dust {
   position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none;
   opacity: var(--dust-a); transform: scale(1.08); will-change: opacity;
-  -webkit-mask-image: linear-gradient(#000 0%, #000 45%, rgba(0,0,0,.35) 100%); mask-image: linear-gradient(#000 0%, #000 45%, rgba(0,0,0,.35) 100%);
 }
 .grain {
   position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: .05;
@@ -239,3 +238,6 @@ body.dropping::after { content: "Drop games to add"; position: fixed; inset: 14p
 @media (prefers-reduced-motion: reduce) {
   .track, .stage, .sheet, .toast { transition-duration: .01s; }
 }
+
+/* the film grain is a full-screen blended layer: cheap on 1080p, noticeable on big or ultrawide monitors, so drop it there */
+@media (min-width: 2200px), (min-resolution: 1.75dppx) and (min-width: 1700px) { .grain { display: none; } }

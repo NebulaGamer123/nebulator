@@ -23,16 +23,79 @@
   const TYPE_LABEL = { vpad: 'Wii U GamePad', pro: 'Pro Controller' };
 
   let root = null, ov = null, player = 0, listening = null, alive = false, seq = null, capTimer = 0, liveTimer = 0, busyCap = false;
+  let joinTimer = 0, devTimer = 0, joinBusy = false, joinBegin = true, autoJoin = true, devSig = '';
   let pressed = new Set();
 
   async function load() {
-    try { ov = await NEB.api('input'); } catch (e) { ov = null; NEB.toast('Controls: ' + e.message); }
-    render();
+    try { ov = await NEB.api('input'); devSig = devSigOf(ov); } catch (e) { ov = null; NEB.toast('Controls: ' + e.message); }
+    joinBegin = true; render();
   }
 
   const pl = () => ov && ov.players[player];
   const btns = () => (pl() && ov.buttons[pl().type]) || [];
   const devName = id => { const d = ov.devices.find(x => x.id === id); return d ? d.name : 'Unavailable device'; };
+
+
+  /* ───────── local multiplayer: hot-plug refresh + press-a-button-to-join ───────── */
+  const freeSlot = () => ov ? ov.players.findIndex(q => !q.configured) : -1;
+  const devSigOf = o => o.devices.map(d => d.id).join(',') + '|' + (o.unsupported || []).join(',');
+
+  async function refreshDevices() {
+    clearTimeout(devTimer);
+    if (!alive) return;
+    try {
+      const o = await NEB.api('input/devices');
+      if (ov && devSigOf(o) !== devSig) {
+        const added = o.devices.filter(d => d.kind === 'gamepad' && !ov.devices.some(x => x.id === d.id));
+        devSig = devSigOf(o);
+        ov.devices = o.devices; ov.unsupported = o.unsupported; ov.generic = o.generic;
+        if (added.length) NEB.toast(added[0].name + ' connected');
+        if (!listening) render();
+      }
+    } catch { /* offline */ }
+    devTimer = setTimeout(refreshDevices, 1500);
+  }
+
+  async function joinLoop() {
+    clearTimeout(joinTimer);
+    if (!alive) return;
+    if (autoJoin && !listening && !joinBusy && ov && freeSlot() >= 0 && !document.body.classList.contains('modal-open')) {
+      joinBusy = true;
+      try {
+        const r = await NEB.api('input/detect', { begin: joinBegin });
+        joinBegin = false;
+        if (r.found) {
+          const slot = freeSlot();
+          ov = await NEB.api('input/join', { device: r.device, player: slot });
+          devSig = devSigOf(ov);
+          player = slot; SFX.bind(); NEB.toast(r.name + ' joined as Player ' + (slot + 1));
+          joinBegin = true; render();
+        }
+      } catch { /* retry */ }
+      joinBusy = false;
+    }
+    joinTimer = setTimeout(joinLoop, 120);
+  }
+
+  function slotsBar() {
+    const free = freeSlot();
+    const chips = ov.players.map(q => {
+      const names = q.configured ? q.devices.map(devName).join(' + ') : '';
+      return h('button', { class: 'pslot' + (q.configured ? ' on' : '') + (q.index === player ? ' sel' : ''), onclick: () => { stopListening(); player = q.index; SFX.tab(); render(); } },
+        h('span', { class: 'pn' }, 'P' + (q.index + 1)), h('span', { class: 'pd' }, q.configured ? names : 'Press a button to join'));
+    });
+    const notes = [];
+    if (ov.unsupported && ov.unsupported.length) notes.push(h('p', { class: 'pnote warn' }, 'Detected but not usable as a gamepad: ' + ov.unsupported.join(', ') + '. Try plugging it in by cable, or pairing it again in Windows Bluetooth settings.'));
+    if (ov.generic && ov.generic.length) notes.push(h('p', { class: 'pnote' }, ov.generic.join(', ') + ' runs on a generic layout. If buttons are off, use Bind all.'));
+    return h('div', { class: 'pbar' },
+      h('div', { class: 'pslots' }, chips),
+      h('div', { class: 'pjoin' },
+        free >= 0
+          ? h('span', null, h('i', { class: 'pulse' }), autoJoin ? 'Press any button on a controller to add it as ' : 'Auto-join is off. Next free slot: ', h('b', null, 'Player ' + (free + 1)))
+          : h('span', null, 'All four players are set up'),
+        h('button', { class: 'btn slim', onclick: () => { autoJoin = !autoJoin; joinBegin = true; SFX.select(); render(); } }, autoJoin ? 'Pause auto-join' : 'Resume auto-join')),
+      notes);
+  }
 
   /* ───────── listening / binding ───────── */
   function stopListening() {
@@ -189,10 +252,12 @@
       side = h('div', { class: 'cside' },
         h('h2', { class: 'ch' }, 'Player ' + (player + 1)),
         h('p', { class: 'lead' }, 'Pick the device this player uses. Defaults are filled in, and you can rebind anything after.'),
-        ov.devices.map(d => h('button', { class: 'dev', onclick: () => setup(d.id, player < 2 && d.kind === 'keyboard' ? 'pro' : 'pro') },
+        [...ov.devices].sort((a, b) => (a.kind === 'gamepad' ? 0 : 1) - (b.kind === 'gamepad' ? 0 : 1)).map(d => h('button', { class: 'dev', onclick: () => setup(d.id, 'pro') },
           h('span', { class: 'dk' }, d.kind === 'keyboard' ? '⌨' : '◉'), h('span', null, d.name), h('span', { class: 'hint' }, d.kind === 'keyboard' ? 'Keyboard' : 'Gamepad'))),
-        ov.devices.every(d => d.kind === 'keyboard') ? h('p', { class: 'lead dim' }, 'No gamepad found. Plug one in and it shows up here.') : null,
-        player > 0 ? h('p', { class: 'lead dim' }, 'Keyboard defaults only exist for player 1. Others need their keys bound by hand.') : null);
+        ov.devices.every(d => d.kind === 'keyboard') ? h('p', { class: 'lead dim' }, 'No controller found yet. Turn it on or plug it in and it appears here by itself. You can also just press a button on it.') : null,
+        player === 0 ? h('p', { class: 'lead dim' }, 'Keyboard: WASD moves, arrow keys are the d-pad, X Z C V are A B X Y.') : null,
+        player === 1 ? h('p', { class: 'lead dim' }, 'Keyboard for player 2 (shares one keyboard with player 1): arrow keys move, numpad 4 2 6 8 are X B A Y, T F G H is the d-pad.') : null,
+        player > 1 ? h('p', { class: 'lead dim' }, 'Keyboard defaults only exist for players 1 and 2. Use controllers for players 3 and 4.') : null);
       main = h('div', { class: 'cmain idle' }, h('div', { class: 'ring big' }, h('span', { class: 'glyph', innerHTML: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 8h12a4 4 0 0 1 4 4l.5 4a2.5 2.5 0 0 1-4.5 1.5L16.5 15h-9L6 17.5A2.5 2.5 0 0 1 1.5 16L2 12a4 4 0 0 1 4-4zM8 10.5v3M6.5 12h3M16 11h.01M18 13h.01"/></svg>' })),
         h('h2', null, 'Not set up'), h('p', { class: 'lead' }, 'This player has no controller yet.'));
     } else {
@@ -227,6 +292,7 @@
 
     root.replaceChildren(h('div', { class: 'pg controls' },
       h('div', { class: 'ph-row' }, h('div', null, h('div', { class: 'eyebrow' }, 'Input'), h('h1', { class: 'ph' }, 'Controls')), tabs),
+      slotsBar(),
       h('div', { class: 'cgrid' }, side, main)));
     paintRows();
   }
@@ -247,9 +313,9 @@
       root = el; alive = true; listening = null; pressed = new Set();
       addEventListener('keydown', onKey, true);
       el.replaceChildren(h('div', { class: 'pg' }));
-      load().then(liveLoop);
+      load().then(() => { liveLoop(); refreshDevices(); joinLoop(); });
     },
-    hide() { alive = false; root = null; stopListening(); removeEventListener('keydown', onKey, true); clearTimeout(liveTimer); },
+    hide() { alive = false; root = null; stopListening(); removeEventListener('keydown', onKey, true); clearTimeout(liveTimer); clearTimeout(joinTimer); clearTimeout(devTimer); },
   });
   NEB.on('online', () => { if (alive) load(); });
 })();

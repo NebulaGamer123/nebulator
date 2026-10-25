@@ -3083,10 +3083,10 @@ index 0000000..699acc1
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlInput.cpp b/src/gui/sdlgui/ControlInput.cpp
 new file mode 100644
-index 0000000..71e9b55
+index 0000000..ea8d26c
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlInput.cpp
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,593 @@
 +// Controller setup and binding API (players 1-4).
 +
 +#include "ControlApi.h"
@@ -3096,6 +3096,9 @@ index 0000000..71e9b55
 +#include "input/emulated/VPADController.h"
 +#include "input/emulated/ProController.h"
 +#include "input/api/Controller.h"
++#include <SDL3/SDL.h>
++#include <map>
++#include <set>
 +
 +namespace ControlApi
 +{
@@ -3160,8 +3163,53 @@ index 0000000..71e9b55
 +
 +		std::string DeviceId(const ControllerPtr& c) { return std::string(c->api_name()) + "|" + c->uuid(); }
 +
++		// Controllers SDL sees but has no gamepad layout for (many generic / Bluetooth pads) are invisible to Cemu.
++		// Give every such device with enough buttons and axes a common layout so it shows up and can be rebound.
++		std::vector<std::string> g_unsupported; // names we could not use
++		std::set<std::string> g_genericNames;   // names that run on the generic layout
++		std::mutex g_genericM;
++
++		void EnsureGenericMappings()
++		{
++			std::scoped_lock gl(g_genericM);
++			g_unsupported.clear();
++			int n = 0;
++			SDL_JoystickID* ids = SDL_GetJoysticks(&n);
++			if (!ids)
++				return;
++			for (int i = 0; i < n; i++)
++			{
++				if (SDL_IsGamepad(ids[i]))
++					continue;
++				const char* nm = SDL_GetJoystickNameForID(ids[i]);
++				const std::string name = nm ? nm : "Unknown controller";
++				bool ok = false;
++				if (SDL_Joystick* js = SDL_OpenJoystick(ids[i]))
++				{
++					ok = SDL_GetNumJoystickAxes(js) >= 2 && SDL_GetNumJoystickButtons(js) >= 6;
++					SDL_CloseJoystick(js);
++				}
++				if (ok)
++				{
++					char guid[64];
++					SDL_GUIDToString(SDL_GetJoystickGUIDForID(ids[i]), guid, sizeof(guid));
++					const std::string m = std::string(guid) + "," + name +
++						",platform:" + SDL_GetPlatform() + ",a:b0,b:b1,x:b2,y:b3,back:b6,start:b7,leftshoulder:b4,rightshoulder:b5,leftstick:b8,rightstick:b9,"
++						"dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5";
++					if (SDL_AddGamepadMapping(m.c_str()) >= 0)
++						g_genericNames.insert(name);
++					else
++						g_unsupported.push_back(name);
++				}
++				else
++					g_unsupported.push_back(name);
++			}
++			SDL_free(ids);
++		}
++
 +		std::vector<ControllerPtr> AllDevices()
 +		{
++			EnsureGenericMappings();
 +			std::vector<ControllerPtr> out;
 +			auto& im = InputManager::instance();
 +			for (auto api : {InputAPI::Keyboard, InputAPI::SDLController})
@@ -3200,6 +3248,22 @@ index 0000000..71e9b55
 +				pad->set_mapping(id, kb, SdlKeys::NativeFromSdl(key));
 +		}
 +
++		template<class C>
++		void ApplyKeyboardDefaultsP2T(const EmulatedControllerPtr& pad, const ControllerPtr& kb)
++		{
++			// second keyboard layout so two people can share one keyboard: right hand side + numpad
++			const std::pair<uint64, SDL_Keycode> map[] = {
++				{C::kButtonId_A, SDLK_KP_6}, {C::kButtonId_B, SDLK_KP_2}, {C::kButtonId_X, SDLK_KP_4}, {C::kButtonId_Y, SDLK_KP_8},
++				{C::kButtonId_L, SDLK_KP_7}, {C::kButtonId_R, SDLK_KP_9}, {C::kButtonId_ZL, SDLK_KP_1}, {C::kButtonId_ZR, SDLK_KP_3},
++				{C::kButtonId_Plus, SDLK_RIGHTBRACKET}, {C::kButtonId_Minus, SDLK_LEFTBRACKET}, {C::kButtonId_Home, SDLK_KP_0},
++				{C::kButtonId_Up, 't'}, {C::kButtonId_Down, 'g'}, {C::kButtonId_Left, 'f'}, {C::kButtonId_Right, 'h'},
++				{C::kButtonId_StickL_Up, SDLK_UP}, {C::kButtonId_StickL_Down, SDLK_DOWN}, {C::kButtonId_StickL_Left, SDLK_LEFT}, {C::kButtonId_StickL_Right, SDLK_RIGHT},
++				{C::kButtonId_StickR_Up, 'o'}, {C::kButtonId_StickR_Down, 'l'}, {C::kButtonId_StickR_Left, 'k'}, {C::kButtonId_StickR_Right, ';'},
++			};
++			for (const auto& [id, key] : map)
++				pad->set_mapping(id, kb, SdlKeys::NativeFromSdl(key));
++		}
++
 +		const char* TypeName(EmulatedController::Type t) { return t == EmulatedController::Type::VPAD ? "vpad" : "pro"; }
 +
 +		HttpResponse Overview()
@@ -3216,6 +3280,22 @@ index 0000000..71e9b55
 +				j.KS("name", c->display_name());
 +				j.KS("kind", IsKeyboard(c) ? "keyboard" : "gamepad");
 +				j.w.EndObject();
++			}
++			j.w.EndArray();
++			j.K("unsupported");
++			j.w.StartArray();
++			{
++				std::scoped_lock gl(g_genericM);
++				for (auto& n : g_unsupported)
++					j.S(n);
++			}
++			j.w.EndArray();
++			j.K("generic");
++			j.w.StartArray();
++			{
++				std::scoped_lock gl(g_genericM);
++				for (auto& n : g_genericNames)
++					j.S(n);
 +			}
 +			j.w.EndArray();
 +			j.K("buttons");
@@ -3298,6 +3378,13 @@ index 0000000..71e9b55
 +						ApplyKeyboardDefaultsT<VPADController>(emu, dev);
 +					else
 +						ApplyKeyboardDefaultsT<ProController>(emu, dev);
++				}
++				else if (p == 1)
++				{
++					if (type == EmulatedController::Type::VPAD)
++						ApplyKeyboardDefaultsP2T<VPADController>(emu, dev);
++					else
++						ApplyKeyboardDefaultsP2T<ProController>(emu, dev);
 +				}
 +			}
 +			else
@@ -3453,6 +3540,91 @@ index 0000000..71e9b55
 +			return Ok(j);
 +		}
 +
++		std::map<std::string, bool> g_detectArmed;
++
++		bool DeviceInUse(const ControllerPtr& c)
++		{
++			auto& im = InputManager::instance();
++			const std::string id = DeviceId(c);
++			for (size_t p = 0; p < 4; p++)
++				if (auto emu = im.get_controller(p))
++					for (auto& d : emu->get_controllers())
++						if (DeviceId(d) == id)
++							return true;
++			return false;
++		}
++
++		// Polled by the UI: which controller that no player uses yet had a button pressed? (press-to-join)
++		HttpResponse Detect(const HttpRequest& req)
++		{
++			rapidjson::Document d;
++			ParseBody(req, d);
++			std::scoped_lock lock(g_captureMutex);
++			if (d.IsObject() && GetBool(d, "begin", false))
++				g_detectArmed.clear();
++			Json j;
++			j.w.StartObject();
++			for (auto& c : AllDevices())
++			{
++				if (IsKeyboard(c) || DeviceInUse(c))
++					continue;
++				const std::string id = DeviceId(c);
++				const auto& state = c->update_state();
++				if (state.buttons.IsIdle())
++				{
++					g_detectArmed[id] = true;
++					continue;
++				}
++				if (!g_detectArmed[id])
++					continue;
++				g_detectArmed[id] = false;
++				j.KB("found", true);
++				j.KS("device", id);
++				j.KS("name", c->display_name());
++				j.w.EndObject();
++				return Ok(j);
++			}
++			j.KB("found", false);
++			j.w.EndObject();
++			return Ok(j);
++		}
++
++		// first player slot without a controller, or -1
++		int FreeSlot()
++		{
++			auto& im = InputManager::instance();
++			for (size_t p = 0; p < 4; p++)
++				if (!im.get_controller(p))
++					return (int)p;
++			return -1;
++		}
++
++		HttpResponse Join(const HttpRequest& req)
++		{
++			rapidjson::Document d;
++			if (!ParseBody(req, d))
++				return Err(400, "invalid json");
++			auto dev = FindDevice(GetStr(d, "device"));
++			if (!dev)
++				return Err(404, "device not found");
++			int64_t p = GetInt(d, "player", -1);
++			if (p < 0)
++				p = FreeSlot();
++			if (!ValidPlayer(p))
++				return Err(409, "all four players already have a controller");
++			auto& im = InputManager::instance();
++			auto emu = im.set_controller((size_t)p, EmulatedController::Type::Pro);
++			if (!emu)
++				return Err(500, "couldn't create the controller");
++			emu->clear_controllers();
++			emu->add_controller(dev);
++			emu->set_default_mapping(dev);
++			im.save((size_t)p);
++			if (p == 0)
++				InputSetUserProfile();
++			return Overview();
++		}
++
 +		// which emulated buttons are held right now (for the live preview on the binding screen)
 +		HttpResponse LiveState(const HttpRequest& req)
 +		{
@@ -3487,6 +3659,8 @@ index 0000000..71e9b55
 +			return Overview();
 +		if (sub == "/state")
 +			return LiveState(req);
++		if (sub == "/devices")
++			return Overview();
 +		if (!post)
 +			return Err(405, "method not allowed");
 +		if (sub == "/setup")
@@ -3497,6 +3671,10 @@ index 0000000..71e9b55
 +			return BindKey(req);
 +		if (sub == "/capture")
 +			return Capture(req);
++		if (sub == "/detect")
++			return Detect(req);
++		if (sub == "/join")
++			return Join(req);
 +		if (sub == "/unbind")
 +			return Unbind(req);
 +		return Err(404, "unknown route");
