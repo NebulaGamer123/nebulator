@@ -169,7 +169,10 @@
   }
 
   function layout() {
-    U = clamp(Math.min(innerWidth / 1200, innerHeight / 780), .5, 1.3) * S.size;
+    // big screens: scale the whole interface up (1080p and below stay exactly as they were)
+    const Z = clamp(Math.min(innerWidth / 1920, innerHeight / 1080), 1, 2.5);
+    document.documentElement.style.setProperty('--z', Z.toFixed(3));
+    U = clamp(Math.min(innerWidth / Z / 1200, innerHeight / Z / 780), .5, 1.3) * S.size;
     stage.style.setProperty('--u', U.toFixed(3));
     moveInd();
     prevPos = NaN;
@@ -190,6 +193,7 @@
     const b = rail.querySelector('.on'); if (!b || !ind) return;
     ind.style.width = b.offsetWidth + 'px';
     ind.style.transform = `translateX(${b.offsetLeft}px)`;
+    if (rail.scrollWidth > rail.clientWidth + 2) rail.scrollTo({ left: Math.max(0, b.offsetLeft - (rail.clientWidth - b.offsetWidth) / 2), behavior: 'smooth' });
   }
 
   let pageId = null;
