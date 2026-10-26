@@ -3689,16 +3689,17 @@ index 0000000..ea8d26c
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlSaves.cpp b/src/gui/sdlgui/ControlSaves.cpp
 new file mode 100644
-index 0000000..c0c726f
+index 0000000..f3adc22
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlSaves.cpp
-@@ -0,0 +1,886 @@
+@@ -0,0 +1,1012 @@
 +// Shared saves: a named copy of a game's save lives on a tiny cloud store (a free Cloudflare Worker the user deploys,
 +// see shared-saves/ in the repo). Anyone who has the code can join it.
-+//   - pressing Play on a game that has a shared save first downloads the newest version (your old save is backed up)
++// The normal Play button never touches it. Only "Play" inside the Shared saves tab uses it:
++//   - your local save is set aside, and the newest shared save is put in its place
 +//   - while the game runs, a changed save is uploaded a few seconds after the game writes it
-+//   - closing the game uploads once more
-+// Other players get your progress the next time THEY start the game: replacing files under a running game is unsafe.
++//   - closing the game uploads once more and then puts your own local save back exactly as it was
++// Other players get your progress the next time THEY start the shared save: replacing files under a running game is unsafe.
 +//
 +// Server API (all JSON except the data bodies):
 +//   POST /v1/create?name=&title=      body = pack            -> {code, version}
@@ -3747,6 +3748,8 @@ index 0000000..c0c726f
 +		bool g_loaded = false;
 +		std::string g_playingTitle; // title id (hex) of the running game that has a shared save, else empty
 +		std::string g_playingCode;
++		std::string g_pendingCode, g_prefetch; // set by /play, consumed when the game is about to start
++		int64_t g_prefetchVer = 0;
 +		std::atomic<bool> g_watch{false};
 +		std::thread g_watcher;
 +
@@ -3968,6 +3971,62 @@ index 0000000..c0c726f
 +			return true;
 +		}
 +
++		// ---- the player's own save is set aside while a shared save is in use, and put back afterwards
++		fs::path StashRoot() { return ActiveSettings::GetUserDataPath("shared_saves_local"); }
++
++		void StashLocal(const std::string& t)
++		{
++			std::error_code ec;
++			const fs::path root = StashRoot(), save = SaveDir(t), dst = root / t;
++			stdfs::create_directories(root, ec);
++			stdfs::remove_all(dst, ec);
++			const bool had = stdfs::exists(save, ec);
++			if (had)
++				stdfs::copy(save, dst, stdfs::copy_options::recursive, ec);
++			std::ofstream(root / (t + ".stash"), std::ios::trunc) << (had ? "had" : "none");
++		}
++
++		void RestoreLocal(const std::string& t)
++		{
++			std::error_code ec;
++			const fs::path root = StashRoot(), marker = root / (t + ".stash");
++			std::ifstream in(marker);
++			if (!in)
++				return;
++			std::string kind;
++			in >> kind;
++			in.close();
++			stdfs::remove_all(SaveDir(t), ec);
++			if (kind == "had")
++			{
++				stdfs::create_directories(SaveDir(t).parent_path(), ec);
++				stdfs::copy(root / t, SaveDir(t), stdfs::copy_options::recursive, ec);
++				if (ec)
++					return; // keep the stash so nothing is lost
++				stdfs::remove_all(root / t, ec);
++			}
++			stdfs::remove(marker, ec);
++		}
++
++		// a crash while a shared save was in use leaves the player's own save set aside: put it back
++		void RecoverStash()
++		{
++			{
++				std::scoped_lock l(g_m);
++				if (!g_playingCode.empty() || !g_pendingCode.empty())
++					return;
++			}
++			if (GetState() != State::Ui)
++				return;
++			std::error_code ec;
++			std::vector<std::string> titles;
++			for (auto it = stdfs::directory_iterator(StashRoot(), ec); !ec && it != stdfs::directory_iterator(); it.increment(ec))
++				if (it->path().extension() == ".stash")
++					titles.push_back(it->path().stem().string());
++			for (auto& t : titles)
++				RestoreLocal(t);
++		}
++
 +		void BackupLocal(const std::string& titleHex)
 +		{
 +			std::error_code ec;
@@ -4130,6 +4189,24 @@ index 0000000..c0c726f
 +			return true;
 +		}
 +
++		bool FetchData(const std::string& code, std::string& data, Meta& m, std::string& err)
++		{
++			std::string base;
++			if (!BaseUrl(base, err))
++				return false;
++			if (!GetMeta(code, m, err))
++				return false;
++			long hc = 0;
++			if (!Http("GET", base + "/v1/" + code + "/data", nullptr, data, hc, err, 120))
++				return false;
++			if (hc != 200)
++			{
++				err = ServerError(hc, data);
++				return false;
++			}
++			return true;
++		}
++
 +		std::string Who()
 +		{
 +			return "NEBULATOR";
@@ -4270,6 +4347,7 @@ index 0000000..c0c726f
 +
 +		HttpResponse Status()
 +		{
++			RecoverStash();
 +			std::scoped_lock l(g_m);
 +			LoadOnce();
 +			Json j;
@@ -4305,16 +4383,48 @@ index 0000000..c0c726f
 +		try
 +		{
 +			const std::string t = NormTitle(HexId(titleId));
-+			const std::string code = FindCodeForTitle(t);
++			RecoverStash();
++			std::string code, data;
++			int64_t ver = 0;
++			{
++				std::scoped_lock l(g_m);
++				code = g_pendingCode;
++				g_pendingCode.clear();
++				data = std::move(g_prefetch);
++				g_prefetch.clear();
++				ver = g_prefetchVer;
++			}
 +			if (code.empty())
-+				return;
++				return; // a normal launch: the local save is left alone
++			{
++				std::scoped_lock l(g_m);
++				bool match = false;
++				for (auto& x : g_entries)
++					if (x.code == code && x.titleId == t)
++						match = true;
++				if (!match)
++					return;
++			}
 +			std::string err;
-+			bool changed = false;
-+			if (Pull(code, err, false, &changed))
-+				SetMsg(code, changed ? "Downloaded the newest shared save before starting" : "Shared save was already up to date", true);
-+			else
-+				SetMsg(code, "Couldn't update before starting (" + err + "). Playing with your local save", false);
++			StashLocal(t);
++			if (!Unpack(data, SaveDir(t), err))
++			{
++				RestoreLocal(t);
++				SetMsg(code, "Couldn't load the shared save (" + err + "). The game started with your own save", false);
++				return;
++			}
++			const uint64_t sig = Signature(SaveDir(t));
 +			std::scoped_lock l(g_m);
++			for (auto& x : g_entries)
++				if (x.code == code)
++				{
++					x.version = ver;
++					x.sig = sig;
++					x.lastSync = (int64_t)std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
++					x.lastMsg = "Playing the shared save";
++					x.lastOk = true;
++				}
++			Save();
 +			g_playingTitle = t;
 +			g_playingCode = code;
 +		}
@@ -4382,10 +4492,11 @@ index 0000000..c0c726f
 +	void SharedSavesGameStopped()
 +	{
 +		StopWatcher();
-+		std::string code;
++		std::string code, title;
 +		{
 +			std::scoped_lock l(g_m);
 +			code = g_playingCode;
++			title = g_playingTitle;
 +			g_playingCode.clear();
 +			g_playingTitle.clear();
 +		}
@@ -4394,9 +4505,18 @@ index 0000000..c0c726f
 +		std::string err;
 +		bool conflict = false;
 +		if (Push(code, err, &conflict))
-+			SetMsg(code, conflict ? "Uploaded. Someone else saved at the same time: their version was kept as the previous one" : "Uploaded the latest save", true);
++			SetMsg(code, conflict ? "Uploaded. Someone else saved at the same time: their version was kept as the previous one" : "Uploaded the latest save. Your own save is back", true);
 +		else
-+			SetMsg(code, "Upload failed (" + err + ")", false);
++		{
++			// keep the shared progress so it is not lost, then give the player their own save back
++			std::error_code ec;
++			const fs::path keep = ActiveSettings::GetUserDataPath("shared_saves_unsent") / code;
++			stdfs::remove_all(keep, ec);
++			stdfs::create_directories(keep, ec);
++			stdfs::copy(SaveDir(title), keep, stdfs::copy_options::recursive, ec);
++			SetMsg(code, "Upload failed (" + err + "). Your progress was kept in " + _pathToUtf8(keep), false);
++		}
++		RestoreLocal(title);
 +	}
 +
 +	// ====================================================================== API
@@ -4511,17 +4631,13 @@ index 0000000..c0c726f
 +			e.name = m.name;
 +			e.titleId = m.title;
 +			e.version = 0;
-+			e.lastMsg = "Joined. The save is downloaded the next time you start the game";
++			e.lastMsg = "Joined. Press Play here to start the game with this shared save";
 +			{
 +				std::scoped_lock l(g_m);
 +				g_entries.push_back(e);
 +				Save();
 +			}
-+			// bring it down right away so the game starts with it
-+			if (!Pull(code, err, true))
-+				SetMsg(code, "Joined, but the first download failed (" + err + ")", false);
-+			else
-+				SetMsg(code, "Joined and downloaded. Your old save for this game was backed up", true);
++			SetMsg(code, "Joined. Press Play here to start the game with this shared save", true);
 +			return OkSimple();
 +		}
 +
@@ -4539,25 +4655,37 @@ index 0000000..c0c726f
 +			Save();
 +			return OkSimple();
 +		}
-+		if (sub == "/push")
++		if (sub == "/play")
 +		{
-+			bool conflict = false;
-+			if (!Push(code, err, &conflict))
++			Entry e;
++			bool found = false;
 +			{
-+				SetMsg(code, "Upload failed (" + err + ")", false);
-+				return Err(502, err);
++				std::scoped_lock l(g_m);
++				for (auto& x : g_entries)
++					if (x.code == code) { e = x; found = true; }
 +			}
-+			SetMsg(code, conflict ? "Uploaded. Someone else saved at the same time: their version was kept as the previous one" : "Uploaded your save", true);
-+			return OkSimple();
-+		}
-+		if (sub == "/pull")
-+		{
-+			if (!Pull(code, err, true))
++			if (!found)
++				return Err(404, "unknown shared save");
++			std::string data;
++			Meta m;
++			if (!FetchData(code, data, m, err))
 +			{
-+				SetMsg(code, "Download failed (" + err + ")", false);
-+				return Err(502, err);
++				SetMsg(code, "Couldn't download the shared save (" + err + ")", false);
++				return Err(502, "couldn't download the shared save: " + err);
 +			}
-+			SetMsg(code, "Downloaded the newest shared save. Your old one was backed up", true);
++			{
++				std::scoped_lock l(g_m);
++				g_pendingCode = code;
++				g_prefetch = std::move(data);
++				g_prefetchVer = m.version;
++			}
++			if (!LaunchTitle(e.titleId, err))
++			{
++				std::scoped_lock l(g_m);
++				g_pendingCode.clear();
++				g_prefetch.clear();
++				return Err(409, err);
++			}
 +			return OkSimple();
 +		}
 +		if (sub == "/restore")
@@ -4571,9 +4699,7 @@ index 0000000..c0c726f
 +				return Err(502, err);
 +			if (hc != 200)
 +				return Err(502, ServerError(hc, out));
-+			if (!Pull(code, err, true))
-+				return Err(502, err);
-+			SetMsg(code, "Went back to the previous version", true);
++			SetMsg(code, "Went back one version. It reaches you the next time you press Play here", true);
 +			return OkSimple();
 +		}
 +		return Err(404, "unknown route");

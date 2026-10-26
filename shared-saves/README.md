@@ -11,3 +11,5 @@
 
 Limits on the free plan: 1000 uploads per day in total and 20 MB per save (each upload counts twice because the previous
 version is kept). Anyone with a save's code can read and overwrite it, so only give codes to friends.
+
+Playing: open NEBULATOR > Co-op > Shared saves > Play this save. The normal Play button on the game shelf keeps using your own local save and never touches the shared one.

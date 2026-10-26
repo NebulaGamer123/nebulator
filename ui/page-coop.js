@@ -317,16 +317,16 @@
       h('div', { class: 'cp-code sm', title: 'Code' }, [...e.code].map(c => h('b', null, c))),
       e.message ? h('p', { class: 'lead ' + (e.ok ? 'dim' : 'cp-err') }, (e.playing ? 'Playing · ' : '') + e.message) : null,
       h('div', { class: 'cp-row' },
+        h('button', { class: 'btn primary', disabled: busy || !games().some(g => String(g.titleId).toLowerCase() === String(e.titleId).toLowerCase()), title: 'Start the game with this shared save. The normal Play button keeps using your own save.',
+          onclick: async () => { if (await svPost('play', { code: e.code })) { NEB.toast('Starting with the shared save…'); } } }, 'Play this save'),
         h('button', { class: 'btn', onclick: () => copyText(sv.url + '/' + e.code, 'Link copied. Send it to your friends') }, 'Copy link'),
-        h('button', { class: 'btn', disabled: busy, onclick: () => svPost('pull', { code: e.code }, 'Downloaded') }, 'Download now'),
-        h('button', { class: 'btn', disabled: busy, onclick: () => svPost('push', { code: e.code }, 'Uploaded') }, 'Upload now'),
-        h('button', { class: 'btn', disabled: busy, title: 'Go back to the version before the latest upload', onclick: () => { if (confirm('Go back to the previous version for everyone?')) svPost('restore', { code: e.code }, 'Went back one version'); } }, 'Undo last upload'),
+        h('button', { class: 'btn', disabled: busy, title: 'Go back to the version before the latest upload (reaches you the next time you press Play here)', onclick: () => { if (confirm('Go back to the previous version for everyone?')) svPost('restore', { code: e.code }, 'Went back one version'); } }, 'Undo last upload'),
         h('button', { class: 'btn danger', disabled: busy, onclick: () => { if (confirm('Stop using this shared save on this PC? Your local save stays as it is, and the online copy remains.')) svPost('remove', { code: e.code }); } }, 'Leave'))));
     const pick = h('select', { class: 'cp-select', onchange: e => { form.svTitle = e.target.value; } },
       h('option', { value: '' }, 'Choose a game…'),
       games().map(g => h('option', { value: g.titleId, selected: String(g.titleId).toLowerCase() === String(form.svTitle).toLowerCase() }, NEB.firstLine(g.name))));
     const create = h('div', null,
-      note('Uploads your current save for a game. Friends join with the link, and from then on the save follows everyone. Start the game and save once first.'),
+      note('Starts a shared save from your current save for a game. Friends join with the link. Your normal Play button always uses your own save; the shared one is played from this tab. Start the game and save once first.'),
       field('Name', textIn('svName', 'e.g. Our Trap Team run', { max: 40 })),
       field('Game', pick),
       h('button', { class: 'btn primary', disabled: busy || !sv.configured, onclick: async () => {
@@ -336,7 +336,7 @@
       } }, 'Create shared save'),
       !sv.configured ? note('Set the server address first.') : null);
     const join = h('div', null,
-      note('Paste the link (or code) from a friend. Your own save for that game is backed up, then replaced by theirs.'),
+      note('Paste the link (or code) from a friend. Nothing on your PC changes until you press Play on it.'),
       field('Link or code', textIn('svJoin', 'https://…/ABCD2345XYZ9', { max: 200, enter: () => doJoinSave() })),
       h('button', { class: 'btn primary', disabled: busy, onclick: () => doJoinSave() }, 'Join shared save'));
     async function doJoinSave() {
@@ -345,7 +345,7 @@
       if (r) { form.svJoin = ''; form.svUrl = null; }
     }
     return h('div', { class: 'cp-subs' },
-      busy ? note('A game is running. Its shared save uploads by itself a few seconds after the game saves, and once more when you close it. Other players get it the next time they start the game.') : null,
+      busy ? note('A game is running. If it was started from here, its shared save uploads by itself a few seconds after the game saves, and once more when you close it. Your own save is put back afterwards.') : null,
       acc('sv-mine', 'Your shared saves', (sv.saves || []).length ? (sv.saves.length + ' in use') : 'None yet', h('div', null, mine.length ? mine : note('You have not created or joined any shared save.')), { sub: true, open: true }),
       acc('sv-new', 'Create one', 'Share your progress', create, { sub: true }),
       acc('sv-join', 'Join a friend’s', 'Paste a link', join, { sub: true }),
