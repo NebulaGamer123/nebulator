@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 644032c..539ee5b 100644
+index 644032c..6c67107 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -55,7 +55,8 @@ if (ENABLE_VCPKG)
@@ -37,7 +37,7 @@ index 644032c..539ee5b 100644
  
  if (ENABLE_METAL AND NOT APPLE)
      message(FATAL_ERROR "Metal backend is only supported on Apple platforms")
-@@ -147,7 +148,6 @@ if (WIN32)
+@@ -147,10 +148,10 @@ if (WIN32)
  endif()
  option(ENABLE_CUBEB "Enabled cubeb backend" ON)
  
@@ -45,7 +45,11 @@ index 644032c..539ee5b 100644
  
  find_package(Threads REQUIRED)
  find_package(CURL REQUIRED)
-@@ -188,7 +188,6 @@ if (UNIX AND NOT APPLE)
++find_package(JPEG) # optional: libjpeg-turbo makes the screen-share encoder about 15x faster
+ find_package(pugixml REQUIRED)
+ find_package(RapidJSON REQUIRED)
+ find_package(Boost COMPONENTS program_options filesystem nowide REQUIRED)
+@@ -188,7 +189,6 @@ if (UNIX AND NOT APPLE)
  		target_include_directories(CemuWaylandProtocols PRIVATE ${Wayland_INCLUDE_DIRS})
  		add_compile_definitions(HAS_WAYLAND)
  	endif()
@@ -53,7 +57,7 @@ index 644032c..539ee5b 100644
  
  	if(ENABLE_BLUEZ)
  		find_package(bluez REQUIRED)
-@@ -232,10 +231,6 @@ if(UNIX AND NOT APPLE)
+@@ -232,10 +232,6 @@ if(UNIX AND NOT APPLE)
  	endif()
  endif()
  
@@ -65,7 +69,7 @@ index 644032c..539ee5b 100644
  	if (NOT ENABLE_VCPKG)
  	    find_package(cubeb)
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index d8378c3..7500b07 100644
+index d8378c3..27ed6dc 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -67,6 +67,19 @@ add_subdirectory(resource)
@@ -97,7 +101,7 @@ index d8378c3..7500b07 100644
  
  if (MACOS_BUNDLE)
  	set_property(TARGET CemuBin PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resource/MacOSXBundleInfo.plist.in")
-@@ -215,6 +228,8 @@ target_link_libraries(CemuBin PRIVATE
+@@ -215,8 +228,18 @@ target_link_libraries(CemuBin PRIVATE
  	CemuGui
  	CemuInput
  	CemuUtil
@@ -105,8 +109,18 @@ index d8378c3..7500b07 100644
 +	libzip::zip
  )
  
++if(JPEG_FOUND)
++	target_link_libraries(CemuBin PRIVATE JPEG::JPEG)
++	target_compile_definitions(CemuBin PRIVATE NEB_HAVE_LIBJPEG)
++	message(STATUS "NEBULATOR: screen-share uses libjpeg-turbo")
++else()
++	message(WARNING "NEBULATOR: libjpeg not found, screen-share uses the slow built-in JPEG encoder")
++endif()
++
  if(UNIX AND NOT APPLE)
-@@ -229,3 +244,13 @@ endif()
+ 	# due to nasm output some linkers will make stack executable
+ 	# cemu does not require this so we explicity disable it
+@@ -229,3 +252,13 @@ endif()
  if (BSD)
  	target_link_libraries(CemuBin PRIVATE execinfo SPIRV-Tools SPIRV-Tools-opt)
  endif()
@@ -319,7 +333,7 @@ index fa77fd9..a3c3709 100644
  	virtual void DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter,
  												sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight,
 diff --git a/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp b/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp
-index 599190a..0f987a4 100644
+index 599190a..a12d069 100644
 --- a/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp
 +++ b/src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp
 @@ -1,3 +1,4 @@
@@ -327,20 +341,71 @@ index 599190a..0f987a4 100644
  #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
  #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
  #include "Cafe/HW/Latte/Renderer/Vulkan/LatteTextureVk.h"
-@@ -1277,6 +1278,153 @@ void VulkanRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool pad
+@@ -1277,6 +1278,206 @@ void VulkanRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool pad
  		SaveScreenshot(rgb_data, width, height, !padView);
  }
  
++// Screen-share capture. Never stalls the renderer: every captured frame is copied into one of a few persistent slots,
++// and a slot is read back a frame or two later, once the GPU has finished with its command buffer.
++namespace
++{
++	struct CoopSlot
++	{
++		VkImage image = VK_NULL_HANDLE;
++		VkDeviceMemory imageMem = VK_NULL_HANDLE;
++		VkBuffer buffer = VK_NULL_HANDLE;
++		VkDeviceMemory bufferMem = VK_NULL_HANDLE;
++		void* ptr = nullptr;
++		int w = 0, h = 0;
++		uint64 cmdId = 0;
++		bool busy = false;
++	};
++	CoopSlot g_coopSlots[3];
++}
++
 +void VulkanRenderer::HandleCoopCapture(LatteTextureView* texView, bool padView)
 +{
-+	if (padView || !Coop::WantFrame())
++	if (padView)
 +		return;
++	auto freeSlot = [&](CoopSlot& sl) {
++		if (sl.ptr)
++			vkUnmapMemory(m_logicalDevice, sl.bufferMem);
++		if (sl.buffer)
++			vkDestroyBuffer(m_logicalDevice, sl.buffer, nullptr);
++		if (sl.bufferMem)
++			vkFreeMemory(m_logicalDevice, sl.bufferMem, nullptr);
++		if (sl.image)
++			vkDestroyImage(m_logicalDevice, sl.image, nullptr);
++		if (sl.imageMem)
++			vkFreeMemory(m_logicalDevice, sl.imageMem, nullptr);
++		sl = CoopSlot{};
++	};
++	// 1. deliver every slot the GPU has finished, oldest first
++	for (;;)
++	{
++		CoopSlot* best = nullptr;
++		for (auto& sl : g_coopSlots)
++			if (sl.busy && HasCommandBufferFinished(sl.cmdId) && (!best || sl.cmdId < best->cmdId))
++				best = &sl;
++		if (!best)
++			break;
++		if (Coop::HasGuests())
++			Coop::SubmitFrameRGBA((const uint8*)best->ptr, best->w, best->h);
++		best->busy = false;
++	}
++	if (!Coop::WantFrame())
++	{
++		if (!Coop::HasGuests())
++			for (auto& sl : g_coopSlots)
++				if (!sl.busy && sl.image)
++					freeSlot(sl);
++		return;
++	}
 +	auto texViewVk = (LatteTextureViewVk*)texView;
 +	auto baseImageTex = texViewVk->GetBaseImage();
 +	if (texViewVk->firstMip != 0)
 +		return;
 +	auto textureVk = baseImageTex->GetImageObj();
-+	textureVk->flagForCurrentCommandBuffer();
 +	auto srcImage = textureVk->m_image;
 +
 +	int width, height;
@@ -364,41 +429,63 @@ index 599190a..0f987a4 100644
 +	if (!(formatProps.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT))
 +		return;
 +
-+	VkImageCreateInfo imageInfo{};
-+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-+	imageInfo.format = blitFormat;
-+	imageInfo.extent = {(uint32)dw, (uint32)dh, 1};
-+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-+	imageInfo.arrayLayers = 1;
-+	imageInfo.mipLevels = 1;
-+	imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
-+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-+	VkImage image = nullptr;
-+	if (vkCreateImage(m_logicalDevice, &imageInfo, nullptr, &image) != VK_SUCCESS)
-+		return;
-+	VkMemoryRequirements memRequirements;
-+	vkGetImageMemoryRequirements(m_logicalDevice, image, &memRequirements);
-+	VkMemoryAllocateInfo allocInfo{};
-+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-+	allocInfo.allocationSize = memRequirements.size;
-+	uint32 memIndex;
-+	if (!memoryManager->FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memIndex))
++	CoopSlot* slot = nullptr;
++	for (auto& sl : g_coopSlots)
++		if (!sl.busy && (!slot || (sl.image && sl.w == dw && sl.h == dh)))
++			slot = &sl;
++	if (!slot)
++		return; // the GPU is still working on all three: skip this frame, never wait
++	if (!slot->image || slot->w != dw || slot->h != dh)
 +	{
-+		vkDestroyImage(m_logicalDevice, image, nullptr);
-+		return;
++		freeSlot(*slot);
++		VkImageCreateInfo imageInfo{};
++		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++		imageInfo.format = blitFormat;
++		imageInfo.extent = {(uint32)dw, (uint32)dh, 1};
++		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
++		imageInfo.arrayLayers = 1;
++		imageInfo.mipLevels = 1;
++		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++		imageInfo.imageType = VK_IMAGE_TYPE_2D;
++		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
++		if (vkCreateImage(m_logicalDevice, &imageInfo, nullptr, &slot->image) != VK_SUCCESS)
++		{
++			*slot = CoopSlot{};
++			return;
++		}
++		VkMemoryRequirements memRequirements;
++		vkGetImageMemoryRequirements(m_logicalDevice, slot->image, &memRequirements);
++		VkMemoryAllocateInfo allocInfo{};
++		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++		allocInfo.allocationSize = memRequirements.size;
++		uint32 memIndex;
++		if (!memoryManager->FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memIndex))
++		{
++			freeSlot(*slot);
++			return;
++		}
++		allocInfo.memoryTypeIndex = memIndex;
++		if (vkAllocateMemory(m_logicalDevice, &allocInfo, nullptr, &slot->imageMem) != VK_SUCCESS)
++		{
++			freeSlot(*slot);
++			return;
++		}
++		vkBindImageMemory(m_logicalDevice, slot->image, slot->imageMem, 0);
++		memoryManager->CreateBuffer(4u * dw * dh, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, slot->buffer, slot->bufferMem);
++		if (!slot->buffer || vkMapMemory(m_logicalDevice, slot->bufferMem, 0, VK_WHOLE_SIZE, 0, &slot->ptr) != VK_SUCCESS)
++		{
++			slot->ptr = nullptr;
++			freeSlot(*slot);
++			return;
++		}
++		slot->w = dw;
++		slot->h = dh;
 +	}
-+	allocInfo.memoryTypeIndex = memIndex;
-+	VkDeviceMemory imageMemory = nullptr;
-+	if (vkAllocateMemory(m_logicalDevice, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS)
-+	{
-+		vkDestroyImage(m_logicalDevice, image, nullptr);
-+		return;
-+	}
-+	vkBindImageMemory(m_logicalDevice, image, imageMemory, 0);
 +
++	textureVk->flagForCurrentCommandBuffer();
++	VkImage image = slot->image;
 +	{
 +		VkImageSubresourceRange range;
 +		range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -445,37 +532,17 @@ index 599190a..0f987a4 100644
 +		range.layerCount = 1;
 +		barrier_image<TRANSFER_READ, TRANSFER_WRITE | IMAGE_WRITE>(baseImageTex, range, baseImageTex->GetDefaultLayout());
 +	}
-+
-+	const uint32 size = 4u * dw * dh;
 +	VkBufferImageCopy region{};
 +	region.bufferRowLength = dw;
 +	region.bufferImageHeight = dh;
 +	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 +	region.imageSubresource.layerCount = 1;
 +	region.imageExtent = {(uint32)dw, (uint32)dh, 1};
-+	void* bufferPtr = nullptr;
-+	VkBuffer buffer = nullptr;
-+	VkDeviceMemory bufferMemory = nullptr;
-+	memoryManager->CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, buffer, bufferMemory);
-+	vkMapMemory(m_logicalDevice, bufferMemory, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
-+	vkCmdCopyImageToBuffer(m_state.currentCommandBuffer, image, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
-+	SubmitCommandBuffer();
-+	WaitCommandBufferFinished(GetCurrentCommandBufferId());
-+
-+	std::vector<uint8> rgb((size_t)3 * dw * dh);
-+	const uint8* src = (const uint8*)bufferPtr;
-+	for (size_t i = 0, n = (size_t)dw * dh; i < n; i++)
-+	{
-+		rgb[i * 3 + 0] = src[i * 4 + 0];
-+		rgb[i * 3 + 1] = src[i * 4 + 1];
-+		rgb[i * 3 + 2] = src[i * 4 + 2];
-+	}
-+	vkUnmapMemory(m_logicalDevice, bufferMemory);
-+	vkFreeMemory(m_logicalDevice, bufferMemory, nullptr);
-+	vkDestroyBuffer(m_logicalDevice, buffer, nullptr);
-+	vkDestroyImage(m_logicalDevice, image, nullptr);
-+	vkFreeMemory(m_logicalDevice, imageMemory, nullptr);
-+	Coop::SubmitFrame(rgb.data(), dw, dh);
++	vkCmdCopyImageToBuffer(m_state.currentCommandBuffer, image, VK_IMAGE_LAYOUT_GENERAL, slot->buffer, 1, &region);
++	slot->cmdId = GetCurrentCommandBufferId();
++	slot->busy = true;
++	Coop::NoteCapture();
++	RequestSubmitSoon();
 +}
 +
  static const float kQueuePriority = 1.0f;
@@ -1514,10 +1581,10 @@ index 0000000..5e8d558
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlCoop.cpp b/src/gui/sdlgui/ControlCoop.cpp
 new file mode 100644
-index 0000000..26986d0
+index 0000000..40132d6
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlCoop.cpp
-@@ -0,0 +1,1195 @@
+@@ -0,0 +1,1252 @@
 +// LAN co-op. One person hosts (the game runs on their PC), friends on the same Wi-Fi press Join in their own
 +// NEBULATOR and type the host's code. The host streams picture and sound to each guest; the guests' buttons arrive as
 +// extra controllers (players 2-4) on the host, so the game just sees more people on the same console.
@@ -1594,6 +1661,7 @@ index 0000000..26986d0
 +	{
 +		boost::system::error_code ec;
 +		s.set_option(tcp::no_delay(true), ec);
++		s.set_option(asio::socket_base::send_buffer_size(256 * 1024), ec); // keep little in flight, so a slow guest shows newer pictures, not older ones
 +	}
 +
 +	void PutU32(std::string& o, uint32_t v) { for (int i = 0; i < 4; i++) o.push_back((char)(v >> (8 * i))); }
@@ -1704,20 +1772,25 @@ index 0000000..26986d0
 +		std::mutex m;
 +		std::atomic_bool running{false};
 +		std::string code, name;
-+		std::atomic<int> quality{60}, fps{30}, maxWidth{640};
++		std::atomic<int> quality{60}, fps{60}, maxWidth{1280};
 +		std::vector<std::shared_ptr<GuestConn>> guests;
 +		std::unique_ptr<asio::io_context> io;
 +		std::unique_ptr<tcp::acceptor> acc;
 +		std::unique_ptr<udp::socket> disc;
-+		std::thread ioThread, encThread, testThread;
++		std::thread ioThread, testThread;
++		std::vector<std::thread> encThreads;
 +		// encoder hand-off (latest wins)
 +		std::mutex em;
 +		std::condition_variable ecv;
-+		std::vector<uint8_t> pend;
++		std::vector<uint8_t> pend; // RGBA
 +		int pw = 0, ph = 0;
 +		bool pendNew = false;
-+		int64_t lastEnc = 0;
-+		std::atomic<int64_t> lastWant{0};
++		uint64_t pendSeq = 0, pubSeq = 0;
++		std::atomic<int64_t> lastCaptureUs{0};
++		std::atomic<uint64_t> bytesOut{0}, framesOut{0};
++		int64_t statT = 0;
++		uint64_t statBytes = 0, statFrames = 0;
++		int kbps = 0, outFps = 0;
 +		std::atomic<int> wrongTries{0};
 +		std::atomic_bool test{false};
 +	} H;
@@ -1990,6 +2063,7 @@ index 0000000..26986d0
 +		while (H.running)
 +		{
 +			int w, h;
++			uint64_t seq;
 +			{
 +				std::unique_lock l(H.em);
 +				H.ecv.wait_for(l, std::chrono::milliseconds(200), [] { return H.pendNew || !H.running; });
@@ -2000,16 +2074,22 @@ index 0000000..26986d0
 +				local.swap(H.pend);
 +				w = H.pw;
 +				h = H.ph;
++				seq = H.pendSeq;
 +				H.pendNew = false;
 +			}
-+			std::string jpg = JpegEnc::Encode(local.data(), w, h, H.quality);
-+			if (jpg.empty())
-+				continue;
 +			std::string payload;
 +			PutU16(payload, (uint32_t)w);
 +			PutU16(payload, (uint32_t)h);
++			const std::string jpg = JpegEnc::EncodeRGBA(local.data(), w, h, H.quality);
++			if (jpg.empty())
++				continue;
 +			payload += jpg;
 +			std::scoped_lock l(H.m);
++			if (seq < H.pubSeq)
++				continue; // a newer picture was already sent by another worker
++			H.pubSeq = seq;
++			H.bytesOut += payload.size();
++			H.framesOut++;
 +			for (auto& g : H.guests)
 +			{
 +				std::scoped_lock gl(g->m);
@@ -2029,18 +2109,20 @@ index 0000000..26986d0
 +		{
 +			if (Coop::WantFrame())
 +			{
-+				const int w = std::min(H.maxWidth.load(), 1280) & ~1, h = (w * 9 / 16) & ~1;
-+				px.resize((size_t)w * h * 3);
++				const int w = std::min(H.maxWidth.load(), 2560) & ~1, h = (w * 9 / 16) & ~1;
++				px.resize((size_t)w * h * 4);
 +				for (int y = 0; y < h; y++)
 +					for (int x = 0; x < w; x++)
 +					{
-+						uint8_t* p = &px[((size_t)y * w + x) * 3];
++						uint8_t* p = &px[((size_t)y * w + x) * 4];
 +						const bool bar = (x > (t * 6) % w && x < (t * 6) % w + 24);
 +						p[0] = bar ? 255 : (uint8_t)(x * 255 / w);
 +						p[1] = bar ? 255 : (uint8_t)(y * 255 / h);
 +						p[2] = bar ? 255 : (uint8_t)((t * 3) & 255);
++						p[3] = 255;
 +					}
-+				Coop::SubmitFrame(px.data(), w, h);
++				Coop::SubmitFrameRGBA(px.data(), w, h);
++				Coop::NoteCapture();
 +				t++;
 +			}
 +			std::this_thread::sleep_for(std::chrono::milliseconds(1000 / std::max(1, H.fps.load())));
@@ -2070,7 +2152,10 @@ index 0000000..26986d0
 +		if (H.io) H.io->stop();
 +		H.ecv.notify_all();
 +		if (H.ioThread.joinable()) H.ioThread.join();
-+		if (H.encThread.joinable()) H.encThread.join();
++		for (auto& t : H.encThreads)
++			if (t.joinable())
++				t.join();
++		H.encThreads.clear();
 +		if (H.testThread.joinable()) H.testThread.join();
 +		H.acc.reset();
 +		H.disc.reset();
@@ -2115,7 +2200,11 @@ index 0000000..26986d0
 +		H.running = true;
 +		H.test = std::getenv("NEBULATOR_COOP_TEST") != nullptr;
 +		H.ioThread = std::thread(IoLoop);
-+		H.encThread = std::thread(EncodeLoop);
++		{
++			const int n = std::clamp((int)std::thread::hardware_concurrency() / 4, 1, 3);
++			for (int i = 0; i < n; i++)
++				H.encThreads.emplace_back(EncodeLoop);
++		}
 +		if (H.test)
 +			H.testThread = std::thread(TestLoop);
 +		return H.code;
@@ -2429,27 +2518,42 @@ index 0000000..26986d0
 +	{
 +		if (!H.running || g_guestCount.load() == 0)
 +			return false;
-+		// rate limit by the configured fps
-+		const int64_t now = NowMs();
-+		const int64_t gap = 1000 / std::max(1, H.fps.load());
-+		return now - H.lastWant.load() >= gap;
++		// rate limit by the configured fps (microsecond precision; 90% of the gap so an irregular game frame time still reaches the target)
++		const int64_t gapUs = 900000 / std::max(1, H.fps.load());
++		return NowUs() - H.lastCaptureUs.load() >= gapUs;
 +	}
 +
 +	bool HasGuests() { return H.running && g_guestCount.load() > 0; }
 +
 +	int MaxWidth() { return H.maxWidth; }
 +
++	void NoteCapture() { H.lastCaptureUs = NowUs(); }
++
++	void SubmitFrameRGBA(const uint8_t* rgba, int w, int h)
++	{
++		if (!H.running || w <= 0 || h <= 0)
++			return;
++		std::scoped_lock l(H.em);
++		H.pend.assign(rgba, rgba + (size_t)w * h * 4);
++		H.pw = w;
++		H.ph = h;
++		H.pendSeq++;
++		H.pendNew = true;
++		H.ecv.notify_one();
++	}
++
 +	void SubmitFrame(const uint8_t* rgb, int w, int h)
 +	{
 +		if (!H.running || w <= 0 || h <= 0)
 +			return;
-+		H.lastWant = NowMs();
-+		std::scoped_lock l(H.em);
-+		H.pend.assign(rgb, rgb + (size_t)w * h * 3);
-+		H.pw = w;
-+		H.ph = h;
-+		H.pendNew = true;
-+		H.ecv.notify_one();
++		std::vector<uint8_t> tmp((size_t)w * h * 4, 255);
++		for (size_t i = 0, n = (size_t)w * h; i < n; i++)
++		{
++			tmp[i * 4] = rgb[i * 3];
++			tmp[i * 4 + 1] = rgb[i * 3 + 1];
++			tmp[i * 4 + 2] = rgb[i * 3 + 2];
++		}
++		SubmitFrameRGBA(tmp.data(), w, h);
 +	}
 +
 +	void SubmitAudio(const int16_t* stereo, int frames)
@@ -2494,6 +2598,26 @@ index 0000000..26986d0
 +				j.KI("fps", H.fps);
 +				j.KI("maxWidth", H.maxWidth);
 +				j.KB("test", H.test);
++				j.KB("fastEncoder", JpegEnc::IsFast());
++				{
++					// measured over the last few seconds
++					const int64_t now = NowMs();
++					if (now - H.statT >= 1500)
++					{
++						const uint64_t b = H.bytesOut, f = H.framesOut;
++						if (H.statT > 0)
++						{
++							const double sec = (double)(now - H.statT) / 1000.0;
++							H.kbps = (int)((double)(b - H.statBytes) * 8.0 / 1000.0 / sec);
++							H.outFps = (int)((double)(f - H.statFrames) / sec + 0.5);
++						}
++						H.statT = now;
++						H.statBytes = b;
++						H.statFrames = f;
++					}
++					j.KI("kbps", H.kbps);
++					j.KI("outFps", H.outFps);
++				}
 +				j.K("guests");
 +				j.w.StartArray();
 +				for (auto& g : H.guests)
@@ -2644,9 +2768,9 @@ index 0000000..26986d0
 +			if (Has(d, "quality"))
 +				H.quality = (int)std::clamp<int64_t>(GetInt(d, "quality", 60), 20, 95);
 +			if (Has(d, "fps"))
-+				H.fps = (int)std::clamp<int64_t>(GetInt(d, "fps", 30), 10, 60);
++				H.fps = (int)std::clamp<int64_t>(GetInt(d, "fps", 60), 10, 120);
 +			if (Has(d, "maxWidth"))
-+				H.maxWidth = (int)std::clamp<int64_t>(GetInt(d, "maxWidth", 640), 320, 1280);
++				H.maxWidth = (int)std::clamp<int64_t>(GetInt(d, "maxWidth", 1280), 320, 2560);
 +			return Status();
 +		}
 +		if (sub == "/host/kick")
@@ -2715,10 +2839,10 @@ index 0000000..26986d0
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlCoop.h b/src/gui/sdlgui/ControlCoop.h
 new file mode 100644
-index 0000000..105edf0
+index 0000000..35af364
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlCoop.h
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,20 @@
 +#pragma once
 +// LAN co-op: hooks used by the renderer / audio code on the host.
 +#include <cstdint>
@@ -2730,6 +2854,10 @@ index 0000000..105edf0
 +	bool HasGuests();
 +	// RGB (3 bytes per pixel, top row first). Copies the data and returns immediately; the encoder runs on its own thread.
 +	void SubmitFrame(const uint8_t* rgb, int w, int h);
++	// Same with 4 bytes per pixel (alpha ignored): what the GPU read-back produces, so no conversion on the render thread.
++	void SubmitFrameRGBA(const uint8_t* rgba, int w, int h);
++	// the renderer recorded a capture now (rate limiting counts from here)
++	void NoteCapture();
 +	// interleaved signed 16-bit stereo at 48 kHz
 +	void SubmitAudio(const int16_t* stereo, int frames);
 +	// largest frame width the host wants (the renderer downscales to this)
@@ -5822,15 +5950,20 @@ index 0000000..e8a2c17
 +};
 diff --git a/src/gui/sdlgui/JpegEnc.cpp b/src/gui/sdlgui/JpegEnc.cpp
 new file mode 100644
-index 0000000..f4c56b2
+index 0000000..bd43561
 --- /dev/null
 +++ b/src/gui/sdlgui/JpegEnc.cpp
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,394 @@
 +#include "JpegEnc.h"
 +
 +#include <algorithm>
 +#include <cmath>
 +#include <vector>
++#include <csetjmp>
++#include <cstdio>
++#ifdef NEB_HAVE_LIBJPEG
++#include <jpeglib.h>
++#endif
 +
 +namespace JpegEnc
 +{
@@ -6136,13 +6269,91 @@ index 0000000..f4c56b2
 +		o += "\xFF\xD9";
 +		return o;
 +	}
++
++#ifdef NEB_HAVE_LIBJPEG
++	namespace
++	{
++		struct ErrMgr
++		{
++			jpeg_error_mgr pub;
++			jmp_buf jb;
++		};
++		void OnError(j_common_ptr c) { longjmp(((ErrMgr*)c->err)->jb, 1); }
++		void OnMessage(j_common_ptr, int) {}
++	} // namespace
++
++	bool IsFast() { return true; }
++
++	std::string EncodeRGBA(const uint8_t* rgba, int w, int h, int quality)
++	{
++		if (!rgba || w < 1 || h < 1 || w > 16384 || h > 16384)
++			return {};
++		jpeg_compress_struct cinfo;
++		ErrMgr err;
++		cinfo.err = jpeg_std_error(&err.pub);
++		err.pub.error_exit = OnError;
++		err.pub.emit_message = OnMessage;
++		unsigned char* buf = nullptr;
++		unsigned long size = 0;
++		if (setjmp(err.jb))
++		{
++			jpeg_destroy_compress(&cinfo);
++			if (buf)
++				free(buf);
++			return {};
++		}
++		jpeg_create_compress(&cinfo);
++		jpeg_mem_dest(&cinfo, &buf, &size);
++		cinfo.image_width = (JDIMENSION)w;
++		cinfo.image_height = (JDIMENSION)h;
++		cinfo.input_components = 4;
++		cinfo.in_color_space = JCS_EXT_RGBX;
++		jpeg_set_defaults(&cinfo);
++		jpeg_set_quality(&cinfo, std::clamp(quality, 1, 100), TRUE);
++		jpeg_set_colorspace(&cinfo, JCS_YCbCr);
++		cinfo.comp_info[0].h_samp_factor = 2;
++		cinfo.comp_info[0].v_samp_factor = 2;
++		cinfo.dct_method = JDCT_IFAST;
++		cinfo.optimize_coding = FALSE;
++		jpeg_start_compress(&cinfo, TRUE);
++		while (cinfo.next_scanline < cinfo.image_height)
++		{
++			JSAMPROW rows[16];
++			const unsigned n = std::min<unsigned>(16, cinfo.image_height - cinfo.next_scanline);
++			for (unsigned i = 0; i < n; i++)
++				rows[i] = (JSAMPROW)(rgba + (size_t)(cinfo.next_scanline + i) * w * 4);
++			jpeg_write_scanlines(&cinfo, rows, n);
++		}
++		jpeg_finish_compress(&cinfo);
++		std::string out((const char*)buf, size);
++		jpeg_destroy_compress(&cinfo);
++		free(buf);
++		return out;
++	}
++#else
++	bool IsFast() { return false; }
++
++	std::string EncodeRGBA(const uint8_t* rgba, int w, int h, int quality)
++	{
++		if (!rgba || w < 1 || h < 1)
++			return {};
++		std::vector<uint8_t> rgb((size_t)w * h * 3);
++		for (size_t i = 0, n = (size_t)w * h; i < n; i++)
++		{
++			rgb[i * 3] = rgba[i * 4];
++			rgb[i * 3 + 1] = rgba[i * 4 + 1];
++			rgb[i * 3 + 2] = rgba[i * 4 + 2];
++		}
++		return Encode(rgb.data(), w, h, quality);
++	}
++#endif
 +} // namespace JpegEnc
 diff --git a/src/gui/sdlgui/JpegEnc.h b/src/gui/sdlgui/JpegEnc.h
 new file mode 100644
-index 0000000..095212b
+index 0000000..3a2baa4
 --- /dev/null
 +++ b/src/gui/sdlgui/JpegEnc.h
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,14 @@
 +#pragma once
 +// Tiny baseline JPEG encoder (4:2:0) for the co-op video stream. No external dependencies.
 +#include <cstdint>
@@ -6152,6 +6363,10 @@ index 0000000..095212b
 +{
 +	// rgb: tightly packed 3 bytes per pixel, row 0 on top. quality 1..100. Returns an empty string on bad input.
 +	std::string Encode(const uint8_t* rgb, int w, int h, int quality);
++	// rgba: 4 bytes per pixel (alpha ignored), row 0 on top. Uses libjpeg-turbo (SIMD) when the build has it, otherwise the
++	// built-in encoder above, which is much slower.
++	std::string EncodeRGBA(const uint8_t* rgba, int w, int h, int quality);
++	bool IsFast(); // true when libjpeg-turbo is in use
 +}
 diff --git a/src/gui/sdlgui/LinuxLtoShim.cpp b/src/gui/sdlgui/LinuxLtoShim.cpp
 new file mode 100644
@@ -42699,17 +42914,24 @@ index e67eb06..670f856 100644
  	static void ShutdownSDL();
  #endif
 diff --git a/vcpkg.json b/vcpkg.json
-index 7f5ceca..c7a29de 100644
+index 7f5ceca..6445e9f 100644
 --- a/vcpkg.json
 +++ b/vcpkg.json
-@@ -1,5 +1,5 @@
+@@ -1,11 +1,12 @@
  {
 -  "name": "cemu",
 +  "name": "nebulator-core",
    "version-string": "1.0",
    "builtin-baseline": "f0fb3ddba5135b80982668de39dbaa139c00d281",
    "dependencies": [
-@@ -39,13 +39,6 @@
+     "pugixml",
+     "zlib",
+     "zstd",
++    "libjpeg-turbo",
+     {
+       "name": "libzip",
+       "default-features": false
+@@ -39,13 +40,6 @@
        "default-features": false
      },
      "zstd",
@@ -42723,7 +42945,7 @@ index 7f5ceca..c7a29de 100644
      "openssl",
      {
        "name": "curl",
-@@ -59,14 +52,6 @@
+@@ -59,14 +53,6 @@
        "default-features": false,
        "platform": "linux"
      },
@@ -42738,7 +42960,7 @@ index 7f5ceca..c7a29de 100644
      "libusb"
    ],
    "overrides": [
-@@ -77,10 +62,6 @@
+@@ -77,10 +63,6 @@
      {
        "name": "sdl3",
        "version": "3.4.10"

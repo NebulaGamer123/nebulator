@@ -243,7 +243,7 @@
     const hs = st.host;
     if (!hs.running) {
       return h('div', null,
-        note('Friends on your Wi-Fi join your game as player 2, 3 or 4. The game runs on this PC; they only need NEBULATOR.'),
+        note('Friends on your Wi-Fi or Ethernet network join your game as player 2, 3 or 4. The game runs on this PC; they only need NEBULATOR. Wired (Ethernet) gives the least delay.'),
         field('Your name (shown to friends)', textIn('hostName', 'e.g. Harrold', { max: 24 })),
         h('button', { class: 'btn primary', onclick: () => post('host/start', { name: form.hostName }) }, 'Start hosting'),
         note('The first time, Windows may ask to allow NEBULATOR on your network. Choose Private networks.'));
@@ -262,14 +262,17 @@
       h('button', { class: 'btn danger', style: 'margin-top:12px', onclick: () => post('host/stop') }, 'Stop hosting'));
   }
 
+  const sendStat = hs => 'Sending now: ' + (hs.outFps || 0) + ' fps · ' + (hs.kbps ? (hs.kbps / 1000).toFixed(0) + ' Mbit/s' : '…') + ' · ' + (hs.guests || []).length + ' friend' + ((hs.guests || []).length === 1 ? '' : 's');
   function qualityBody() {
     const hs = st.host;
     return h('div', null,
       h('div', { class: 'cp-opts' },
-        h('div', null, h('span', { class: 'hint' }, 'Picture size'), seg([[480, 'Small'], [640, 'Normal'], [854, 'Sharp']], hs.maxWidth, v => post('host/settings', { maxWidth: +v }))),
-        h('div', null, h('span', { class: 'hint' }, 'Smoothness'), seg([[20, '20 fps'], [30, '30 fps'], [60, '60 fps']], hs.fps, v => post('host/settings', { fps: +v }))),
+        h('div', null, h('span', { class: 'hint' }, 'Picture size'), seg([[854, '480p'], [1280, '720p'], [1920, '1080p'], [2560, '1440p']], hs.maxWidth, v => post('host/settings', { maxWidth: +v }))),
+        h('div', null, h('span', { class: 'hint' }, 'Smoothness'), seg([[30, '30 fps'], [60, '60 fps'], [90, '90 fps'], [120, '120 fps']], hs.fps, v => post('host/settings', { fps: +v }))),
         h('div', null, h('span', { class: 'hint' }, 'Compression'), seg([[40, 'Light'], [60, 'Balanced'], [80, 'Crisp']], hs.quality, v => post('host/settings', { quality: +v })))),
-      note('Lower the size or smoothness if a friend’s picture stutters. Your own game is never affected by these.'));
+      h('p', { class: 'lead mono', 'data-sendstat': '1' }, sendStat(hs)),
+      hs.fastEncoder === false ? h('p', { class: 'lead cp-err' }, 'This build has no fast video encoder, so high sizes and frame rates will lag. Use 480p–720p at 30 fps, or update NEBULATOR.') : null,
+      note('Your own game is never slowed by these: the picture is copied after your frame is drawn. The stream cannot be smoother than the game itself, so for 120 fps turn on a frame-rate graphics pack (like FPS++) for this game in Graphics. Higher size, smoothness and Crisp use more network: 1440p at 120 fps needs a wired connection (Ethernet) on both PCs; for Wi-Fi 5 GHz 720p at 60 fps is a good start.'));
   }
 
   function joinBody() {
@@ -281,7 +284,7 @@
     const joining = g.state === 'connecting';
     return h('div', null,
       note('You do not need the game. You will see and hear your friend’s game and play with your keyboard or controller.'),
-      h('div', { class: 'cp-row' }, h('button', { class: 'btn', onclick: scan }, scanning ? 'Searching…' : 'Search'), h('span', { class: 'hint' }, 'Same Wi-Fi only')),
+      h('div', { class: 'cp-row' }, h('button', { class: 'btn', onclick: scan }, scanning ? 'Searching…' : 'Search'), h('span', { class: 'hint' }, 'Same network (Wi-Fi or Ethernet)')),
       hostList,
       field('Host address', textIn('ip', 'e.g. 192.168.1.23', { max: 45 })),
       field('Join code', textIn('code', 'ABCDE', { max: 8, upper: true, enter: doJoin })),
@@ -379,6 +382,7 @@
 
   function paintLive() {
     if (!root) return;
+    if (st && st.host.running) { const el = root.querySelector('[data-sendstat]'); if (el) el.textContent = sendStat(st.host); }
     if (st) (st.host.guests || []).forEach(g => { const el = root.querySelector(`[data-ping="${g.slot}"]`); if (el) el.textContent = g.pingMs >= 0 ? g.pingMs + ' ms' : '— ms'; });
     if (lk) {
       (lk.players || []).forEach(p => { const el = root.querySelector(`[data-lkping="${p.slot}"]`); if (el) el.textContent = p.pingMs >= 0 ? p.pingMs + ' ms' : '— ms'; });
@@ -471,11 +475,54 @@
     } catch { /* closed on leave */ }
   }
 
+  /* Picture: read the host's stream ourselves and always paint only the newest frame, so a slow moment never builds a queue
+     (an <img> keeps every frame and falls further behind). */
+  function videoLoop(canvas) {
+    const ctl = view.vabort = new AbortController();
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    let latest = null, inflight = 0;
+    const paint = () => {
+      view.vraf = requestAnimationFrame(paint);
+      if (!latest) return;
+      const b = latest; latest = null;
+      if (canvas.width !== b.width || canvas.height !== b.height) { canvas.width = b.width; canvas.height = b.height; }
+      ctx.drawImage(b, 0, 0);
+      b.close();
+    };
+    view.vraf = requestAnimationFrame(paint);
+    (async () => {
+      try {
+        const r = await fetch('/api/coop/stream?t=' + encodeURIComponent(NEB.token || ''), { signal: ctl.signal });
+        const rd = r.body.getReader(), dec = new TextDecoder();
+        let buf = new Uint8Array(0);
+        for (;;) {
+          const { value, done } = await rd.read();
+          if (done) break;
+          const nb = new Uint8Array(buf.length + value.length); nb.set(buf); nb.set(value, buf.length); buf = nb;
+          for (;;) {
+            let he = -1;
+            for (let i = 0; i + 3 < buf.length && i < 400; i++) if (buf[i] === 13 && buf[i + 1] === 10 && buf[i + 2] === 13 && buf[i + 3] === 10) { he = i; break; }
+            if (he < 0) break;
+            const m = /Content-Length:\s*(\d+)/i.exec(dec.decode(buf.subarray(0, he)));
+            if (!m) { buf = buf.slice(he + 4); continue; }
+            const len = +m[1];
+            if (buf.length < he + 4 + len) break;
+            const jpg = buf.slice(he + 4, he + 4 + len);
+            buf = buf.slice(he + 4 + len);
+            if (inflight >= 2) continue; // decoder is behind: drop this one, the next is newer anyway
+            inflight++;
+            createImageBitmap(new Blob([jpg], { type: 'image/jpeg' })).then(bm => { inflight--; if (latest) latest.close(); latest = bm; }, () => { inflight--; });
+          }
+        }
+      } catch { /* closed on leave */ }
+    })();
+  }
+
   function enterView() {
     if (view.on) return;
     view.on = true; NEB.captureKeys = true; NEB.padBusy = true;
     document.body.classList.add('coop-view');
-    const img = h('img', { class: 'cv-img', alt: '', draggable: 'false', src: '/api/coop/stream?t=' + encodeURIComponent(NEB.token || '') });
+    const img = h('canvas', { class: 'cv-img', width: 1280, height: 720 });
     view.hud = h('div', { class: 'cv-hud' }, 'Connecting…');
     view.menu = h('div', { class: 'cv-menu' },
       h('h2', null, 'Co-op'),
@@ -487,7 +534,7 @@
     document.body.appendChild(view.el);
     addEventListener('keydown', onKeyDown, true); addEventListener('keyup', onKeyUp, true); addEventListener('blur', onBlur);
     view.sent = ''; view.padB = 0; view.padAx = [0, 0, 0, 0]; view.down.clear();
-    pushInput(); view.raf = requestAnimationFrame(pollPad); audioLoop();
+    pushInput(); view.raf = requestAnimationFrame(pollPad); audioLoop(); videoLoop(img);
   }
   function leaveView() {
     if (!view.on) return;
@@ -496,6 +543,8 @@
     removeEventListener('keydown', onKeyDown, true); removeEventListener('keyup', onKeyUp, true); removeEventListener('blur', onBlur);
     cancelAnimationFrame(view.raf);
     if (view.abort) view.abort.abort();
+    if (view.vabort) view.vabort.abort();
+    cancelAnimationFrame(view.vraf);
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     if (view.el) view.el.remove();
     view.el = view.hud = view.menu = null;
