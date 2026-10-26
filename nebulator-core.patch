@@ -686,10 +686,31 @@ index 9fe4bea..c01f9f9 100644
  			{
  				__OSCheckSystemEvents();
 diff --git a/src/Cafe/OS/libs/nsyshid/Skylander.cpp b/src/Cafe/OS/libs/nsyshid/Skylander.cpp
-index 7833796..0970f0c 100644
+index 7833796..59f9a10 100644
 --- a/src/Cafe/OS/libs/nsyshid/Skylander.cpp
 +++ b/src/Cafe/OS/libs/nsyshid/Skylander.cpp
-@@ -1027,5 +1027,10 @@ namespace nsyshid
+@@ -815,7 +815,7 @@ namespace nsyshid
+ 		}
+ 	}
+ 
+-	uint8 SkylanderUSB::LoadSkylander(uint8* buf, std::unique_ptr<FileStream> file)
++	uint8 SkylanderUSB::LoadSkylander(uint8* buf, std::unique_ptr<FileStream> file, uint8 preferredSlot)
+ 	{
+ 		std::lock_guard lock(m_skyMutex);
+ 
+@@ -827,6 +827,11 @@ namespace nsyshid
+ 		}
+ 		uint8 foundSlot = 0xFF;
+ 
++		// NEBULATOR: a figure placed in portal slot N of the UI sits on spot N of the emulated portal, so the game always sees
++		// them in the order 1, 2, 3 ... no matter in which order they were placed
++		if (preferredSlot < 16 && (m_skylanders[preferredSlot].status & 1) == 0)
++			foundSlot = preferredSlot;
++		else
+ 		// mimics spot retaining on the portal
+ 		for (auto i = 0; i < 16; i++)
+ 		{
+@@ -1027,5 +1032,10 @@ namespace nsyshid
  
  		skyFile->SetPosition(0);
  		skyFile->writeData(data.data(), data.size());
@@ -701,6 +722,19 @@ index 7833796..0970f0c 100644
  	}
  } // namespace nsyshid
 \ No newline at end of file
+diff --git a/src/Cafe/OS/libs/nsyshid/Skylander.h b/src/Cafe/OS/libs/nsyshid/Skylander.h
+index 9b9580b..970aeab 100644
+--- a/src/Cafe/OS/libs/nsyshid/Skylander.h
++++ b/src/Cafe/OS/libs/nsyshid/Skylander.h
+@@ -85,7 +85,7 @@ namespace nsyshid
+ 		void WriteBlock(uint8 skyNum, uint8 block, const uint8* toWriteBuf,
+ 						uint8* replyBuf);
+ 
+-		uint8 LoadSkylander(uint8* buf, std::unique_ptr<FileStream> file);
++		uint8 LoadSkylander(uint8* buf, std::unique_ptr<FileStream> file, uint8 preferredSlot = 0xFF);
+ 		bool RemoveSkylander(uint8 skyNum);
+ 		bool CreateSkylander(fs::path pathName, uint16 skyId, uint16 skyVar);
+ 		uint16 SkylanderCRC16(uint16 initValue, const uint8* buffer, uint32 size);
 diff --git a/src/Cafe/OS/libs/snd_core/ax_out.cpp b/src/Cafe/OS/libs/snd_core/ax_out.cpp
 index 6cb1599..9eac773 100644
 --- a/src/Cafe/OS/libs/snd_core/ax_out.cpp
@@ -4835,7 +4869,7 @@ index 0000000..f3adc22
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlSky.cpp b/src/gui/sdlgui/ControlSky.cpp
 new file mode 100644
-index 0000000..b410087
+index 0000000..57c78ce
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlSky.cpp
 @@ -0,0 +1,316 @@
@@ -4956,7 +4990,7 @@ index 0000000..b410087
 +				err = "couldn't open the figure file for writing";
 +				return false;
 +			}
-+			const uint8 portalSlot = nsyshid::g_skyportal.LoadSkylander(data.data(), std::move(stream));
++			const uint8 portalSlot = nsyshid::g_skyportal.LoadSkylander(data.data(), std::move(stream), (uint8)slot);
 +			if (portalSlot == 0xFF)
 +			{
 +				err = "the portal is full";

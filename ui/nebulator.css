@@ -87,12 +87,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 }
 .stage.drag { cursor: grabbing; }
 body.sheet-open .stage { transform: translateX(calc(-1 * min(190px, 14vw))); }
+/* The fade between sections must NOT use opacity on .track: any opacity below 1 flattens a preserve-3d element, so the
+   side cartridges lost their depth (looked bigger) for the length of the fade and then snapped back. Instead the track
+   animates --fade and every cartridge multiplies its own opacity by it. */
+@property --fade { syntax: "<number>"; inherits: true; initial-value: 1; }
 .track {
-  position: absolute; inset: 0; transform-style: preserve-3d;
-  transition: transform .34s var(--ease), opacity .26s;
+  position: absolute; inset: 0; transform-style: preserve-3d; --fade: 1;
+  transition: transform .34s var(--ease), --fade .26s;
 }
-.track.out { transform: translate(calc(var(--dir, 1) * -34px), -42px); opacity: 0; transition-duration: .17s; }
-.track.in  { transform: translate(calc(var(--dir, 1) * 34px), -42px);  opacity: 0; transition: none; }
+.track.out { transform: translate(calc(var(--dir, 1) * -34px), -42px); --fade: 0; transition-duration: .17s; }
+.track.in  { transform: translate(calc(var(--dir, 1) * 34px), -42px);  --fade: 0; transition: none; }
 
 .cart {
   position: absolute; left: 50%; top: 46%; width: 200px; height: 252px; margin: -126px 0 0 -100px;

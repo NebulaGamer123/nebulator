@@ -162,7 +162,7 @@
       const rot = clamp(-o * 26, -42, 42);
       const sc = (1 - Math.min(a, 3) * .09) * U;
       e.style.transform = `translate3d(${x.toFixed(1)}px,${lift.toFixed(1)}px,${z.toFixed(0)}px) rotateY(${rot.toFixed(1)}deg) skewX(${sk.toFixed(2)}deg) scale(${sc.toFixed(3)})`;
-      e.style.opacity = a > 3.2 ? clamp(1 - (a - 3.2) / 1.4, 0, 1) : 1 - Math.max(0, a - 1) * .14;
+      e.style.opacity = 'calc(' + (a > 3.2 ? clamp(1 - (a - 3.2) / 1.4, 0, 1) : 1 - Math.max(0, a - 1) * .14).toFixed(3) + ' * var(--fade, 1))';
       e.style.zIndex = 100 - Math.round(a * 10);
       e.style.setProperty('--dim', (Math.min(a, 3) * .1).toFixed(2));
     }
