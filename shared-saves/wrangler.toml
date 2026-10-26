@@ -1,0 +1,8 @@
+name = "nebulator-saves"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# `npx wrangler kv namespace create SAVES` prints an id: paste it here.
+[[kv_namespaces]]
+binding = "SAVES"
+id = "PASTE_THE_ID_HERE"

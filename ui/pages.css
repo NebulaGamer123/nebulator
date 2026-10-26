@@ -351,3 +351,11 @@ body.coop-view { overflow: hidden; }
   .cp-g.lk .hint { display: none; }
 }
 @media (max-height: 560px) { .pg { padding-top: 14px; } .ph-row { margin-bottom: 12px; } }
+
+/* shared saves */
+.cp-sv { padding: 14px 0; border-top: 1px solid var(--line, rgba(255,255,255,.12)); }
+.cp-sv:first-child { border-top: 0; padding-top: 4px; }
+.cp-sv-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 8px; }
+.cp-sv .cp-row { flex-wrap: wrap; gap: 8px; }
+.cp-code.sm { gap: 4px; flex-wrap: wrap; }
+.cp-code.sm b { font-size: 15px; padding: 6px 0; max-width: 28px; }

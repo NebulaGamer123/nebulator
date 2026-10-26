@@ -65,10 +65,10 @@ index 644032c..539ee5b 100644
  	if (NOT ENABLE_VCPKG)
  	    find_package(cubeb)
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index d8378c3..fe1a72c 100644
+index d8378c3..7500b07 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -67,6 +67,18 @@ add_subdirectory(resource)
+@@ -67,6 +67,19 @@ add_subdirectory(resource)
  add_executable(CemuBin
  	main.cpp
  	mainLLE.cpp
@@ -76,6 +76,7 @@ index d8378c3..fe1a72c 100644
 +	gui/sdlgui/LinuxLtoShim.cpp
 +	gui/sdlgui/ControlUpdate.cpp
 +	gui/sdlgui/ControlCoop.cpp
++	gui/sdlgui/ControlSaves.cpp
 +	gui/sdlgui/LockstepCore.cpp
 +	gui/sdlgui/LockstepNet.cpp
 +	gui/sdlgui/JpegEnc.cpp
@@ -87,7 +88,7 @@ index d8378c3..fe1a72c 100644
  )
  
  cemu_use_precompiled_header(CemuBin)
-@@ -94,7 +106,7 @@ string(TIMESTAMP CURRENT_YEAR "%Y" UTC)
+@@ -94,7 +107,7 @@ string(TIMESTAMP CURRENT_YEAR "%Y" UTC)
  
  set_property(TARGET CemuBin PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
  set_property(TARGET CemuBin PROPERTY WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>)
@@ -96,7 +97,7 @@ index d8378c3..fe1a72c 100644
  
  if (MACOS_BUNDLE)
  	set_property(TARGET CemuBin PROPERTY MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resource/MacOSXBundleInfo.plist.in")
-@@ -215,6 +227,8 @@ target_link_libraries(CemuBin PRIVATE
+@@ -215,6 +228,8 @@ target_link_libraries(CemuBin PRIVATE
  	CemuGui
  	CemuInput
  	CemuUtil
@@ -105,7 +106,7 @@ index d8378c3..fe1a72c 100644
  )
  
  if(UNIX AND NOT APPLE)
-@@ -229,3 +243,13 @@ endif()
+@@ -229,3 +244,13 @@ endif()
  if (BSD)
  	target_link_libraries(CemuBin PRIVATE execinfo SPIRV-Tools SPIRV-Tools-opt)
  endif()
@@ -722,10 +723,10 @@ index d66e971..593c886 100644
 -endif()
 diff --git a/src/gui/sdlgui/ControlApi.cpp b/src/gui/sdlgui/ControlApi.cpp
 new file mode 100644
-index 0000000..e8c2a45
+index 0000000..c8b32c7
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.cpp
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,691 @@
 +#include "ControlApi.h"
 +
 +#include "config/ActiveSettings.h"
@@ -1410,6 +1411,8 @@ index 0000000..e8c2a45
 +			return HandleGfx(req, route.substr(3));
 +		if (route.rfind("coop", 0) == 0)
 +			return HandleCoop(req, route.substr(4));
++		if (route.rfind("saves", 0) == 0)
++			return HandleSaves(req, route.substr(5));
 +		if (route.rfind("update", 0) == 0)
 +			return HandleUpdate(req, route.substr(6));
 +		return Err(404, "unknown route");
@@ -1417,10 +1420,10 @@ index 0000000..e8c2a45
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlApi.h b/src/gui/sdlgui/ControlApi.h
 new file mode 100644
-index 0000000..75a440c
+index 0000000..5e8d558
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,88 @@
 +#pragma once
 +// JSON API + static file server behind the NEBULATOR UI.
 +
@@ -1496,6 +1499,10 @@ index 0000000..75a440c
 +	HttpResponse HandleGfx(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleUpdate(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleCoop(const HttpRequest& req, const std::string& sub);
++	HttpResponse HandleSaves(const HttpRequest& req, const std::string& sub);
++	void SharedSavesBeforeLaunch(uint64_t titleId);
++	void SharedSavesGameStarted();
++	void SharedSavesGameStopped();
 +	HttpResponse HandleLock(const HttpRequest& req, const std::string& sub); // coop/lock/*
 +	bool LaunchTitle(const std::string& titleIdHex, std::string& err);
 +	std::string CurrentTitle();
@@ -3677,6 +3684,898 @@ index 0000000..ea8d26c
 +			return Join(req);
 +		if (sub == "/unbind")
 +			return Unbind(req);
++		return Err(404, "unknown route");
++	}
++} // namespace ControlApi
+diff --git a/src/gui/sdlgui/ControlSaves.cpp b/src/gui/sdlgui/ControlSaves.cpp
+new file mode 100644
+index 0000000..c0c726f
+--- /dev/null
++++ b/src/gui/sdlgui/ControlSaves.cpp
+@@ -0,0 +1,886 @@
++// Shared saves: a named copy of a game's save lives on a tiny cloud store (a free Cloudflare Worker the user deploys,
++// see shared-saves/ in the repo). Anyone who has the code can join it.
++//   - pressing Play on a game that has a shared save first downloads the newest version (your old save is backed up)
++//   - while the game runs, a changed save is uploaded a few seconds after the game writes it
++//   - closing the game uploads once more
++// Other players get your progress the next time THEY start the game: replacing files under a running game is unsafe.
++//
++// Server API (all JSON except the data bodies):
++//   POST /v1/create?name=&title=      body = pack            -> {code, version}
++//   GET  /v1/<code>                                          -> {name, title, version, updated, size, by}
++//   GET  /v1/<code>/data                                     -> pack
++//   PUT  /v1/<code>?base=<n>&by=<who>  body = pack           -> {version, conflict}
++//   POST /v1/<code>/restore                                  -> {version}   (swaps the previous version back in)
++// Pack format: repeated [u16 pathLen][path][u64 size][bytes]
++
++#include "ControlApi.h"
++
++#include "config/ActiveSettings.h"
++#include "Cafe/CafeSystem.h"
++
++#include <curl/curl.h>
++
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <mutex>
++#include <thread>
++
++namespace stdfs = std::filesystem;
++
++namespace ControlApi
++{
++	namespace
++	{
++		constexpr size_t kMaxPack = 20u * 1024 * 1024; // KV values are limited to 25 MiB
++
++		struct Entry
++		{
++			std::string code, name, titleId, lastMsg;
++			int64_t version = 0; // server version this PC last synced with
++			uint64_t sig = 0; // local save signature at that moment
++			int64_t lastSync = 0; // unix seconds
++			bool lastOk = true;
++		};
++
++		std::mutex g_m;
++		std::string g_url;
++		std::vector<Entry> g_entries;
++		bool g_loaded = false;
++		std::string g_playingTitle; // title id (hex) of the running game that has a shared save, else empty
++		std::string g_playingCode;
++		std::atomic<bool> g_watch{false};
++		std::thread g_watcher;
++
++		fs::path FilePath() { return ActiveSettings::GetUserDataPath("shared_saves.json"); }
++
++		std::string Lower(std::string s)
++		{
++			for (char& c : s)
++				c = (char)tolower((unsigned char)c);
++			return s;
++		}
++
++		std::string NormTitle(const std::string& t)
++		{
++			try
++			{
++				char b[20];
++				snprintf(b, sizeof(b), "%016llx", (unsigned long long)std::stoull(t, nullptr, 16));
++				return b;
++			}
++			catch (...)
++			{
++				return Lower(t);
++			}
++		}
++
++		std::string NormCode(const std::string& in)
++		{
++			std::string o;
++			for (char c : in)
++				if (isalnum((unsigned char)c))
++					o += (char)toupper((unsigned char)c);
++			return o;
++		}
++
++		void Save() // g_m held
++		{
++			Json j;
++			j.w.StartObject();
++			j.KS("url", g_url);
++			j.K("saves");
++			j.w.StartArray();
++			for (auto& e : g_entries)
++			{
++				j.w.StartObject();
++				j.KS("code", e.code);
++				j.KS("name", e.name);
++				j.KS("titleId", e.titleId);
++				j.KI("version", e.version);
++				j.KS("sig", std::to_string(e.sig));
++				j.KI("lastSync", e.lastSync);
++				j.w.EndObject();
++			}
++			j.w.EndArray();
++			j.w.EndObject();
++			std::ofstream out(FilePath(), std::ios::trunc | std::ios::binary);
++			out.write(j.sb.GetString(), (std::streamsize)j.sb.GetSize());
++		}
++
++		void LoadOnce() // g_m held
++		{
++			if (g_loaded)
++				return;
++			g_loaded = true;
++			std::ifstream in(FilePath(), std::ios::binary);
++			if (!in)
++				return;
++			std::string s((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++			rapidjson::Document d;
++			d.Parse(s.c_str());
++			if (d.HasParseError() || !d.IsObject())
++				return;
++			g_url = GetStr(d, "url");
++			if (d.HasMember("saves") && d["saves"].IsArray())
++				for (auto& v : d["saves"].GetArray())
++				{
++					if (!v.IsObject())
++						continue;
++					Entry e;
++					e.code = GetStr(v, "code");
++					e.name = GetStr(v, "name");
++					e.titleId = NormTitle(GetStr(v, "titleId"));
++					e.version = GetInt(v, "version");
++					try { e.sig = std::stoull(GetStr(v, "sig", "0")); } catch (...) {}
++					e.lastSync = GetInt(v, "lastSync");
++					if (!e.code.empty())
++						g_entries.push_back(e);
++				}
++		}
++
++		fs::path SaveDir(const std::string& titleHex)
++		{
++			const uint64_t id = std::stoull(titleHex, nullptr, 16);
++			char b[40], c[40];
++			snprintf(b, sizeof(b), "%08x", (unsigned)(id >> 32));
++			snprintf(c, sizeof(c), "%08x", (unsigned)(id & 0xFFFFFFFF));
++			return ActiveSettings::GetMlcPath("usr/save") / b / c;
++		}
++
++		// changes whenever a file is added, removed, resized or rewritten
++		uint64_t Signature(const fs::path& dir)
++		{
++			uint64_t h = 1469598103934665603ull;
++			auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
++			std::error_code ec;
++			if (!stdfs::exists(dir, ec))
++				return 0;
++			for (auto it = stdfs::recursive_directory_iterator(dir, ec); !ec && it != stdfs::recursive_directory_iterator(); it.increment(ec))
++			{
++				std::error_code e2;
++				if (!it->is_regular_file(e2))
++					continue;
++				for (char c : it->path().lexically_relative(dir).generic_string())
++					mix((unsigned char)c);
++				mix((uint64_t)it->file_size(e2));
++				mix((uint64_t)it->last_write_time(e2).time_since_epoch().count());
++			}
++			return h ? h : 1;
++		}
++
++		bool Pack(const fs::path& dir, std::string& out, std::string& err)
++		{
++			std::error_code ec;
++			out.clear();
++			if (!stdfs::exists(dir, ec))
++			{
++				err = "there is no save for this game on this PC yet. Start the game and save once";
++				return false;
++			}
++			for (auto it = stdfs::recursive_directory_iterator(dir, ec); !ec && it != stdfs::recursive_directory_iterator(); it.increment(ec))
++			{
++				std::error_code e2;
++				if (!it->is_regular_file(e2))
++					continue;
++				const std::string rel = it->path().lexically_relative(dir).generic_string();
++				const uint64_t sz = (uint64_t)it->file_size(e2);
++				if (out.size() + sz + rel.size() + 16 > kMaxPack)
++				{
++					err = "the save is larger than 20 MB, which is more than the free cloud store takes";
++					return false;
++				}
++				const uint16_t pl = (uint16_t)rel.size();
++				out.append((const char*)&pl, 2);
++				out += rel;
++				out.append((const char*)&sz, 8);
++				std::ifstream f(it->path(), std::ios::binary);
++				const size_t at = out.size();
++				out.resize(at + (size_t)sz);
++				f.read(&out[at], (std::streamsize)sz);
++			}
++			if (out.empty())
++			{
++				err = "the save folder is empty. Start the game and save once";
++				return false;
++			}
++			return true;
++		}
++
++		bool Unpack(const std::string& in, const fs::path& dir, std::string& err)
++		{
++			// validate first so a broken download can't damage the existing save
++			size_t p = 0;
++			int files = 0;
++			while (p < in.size())
++			{
++				uint16_t pl;
++				if (p + 2 > in.size())
++					break;
++				memcpy(&pl, &in[p], 2);
++				p += 2;
++				if (p + pl + 8 > in.size())
++					{ err = "the downloaded save is damaged"; return false; }
++				const std::string rel = in.substr(p, pl);
++				p += pl;
++				uint64_t sz;
++				memcpy(&sz, &in[p], 8);
++				p += 8;
++				if (sz > in.size() || p + sz > in.size())
++					{ err = "the downloaded save is damaged"; return false; }
++				if (rel.empty() || rel.find("..") != std::string::npos || rel[0] == '/' || rel.find('\\') != std::string::npos || rel.find(':') != std::string::npos)
++					{ err = "the downloaded save has an unsafe file name"; return false; }
++				p += (size_t)sz;
++				files++;
++			}
++			if (p != in.size() || files == 0)
++				{ err = "the downloaded save is damaged"; return false; }
++			std::error_code ec;
++			fs::path tmp = dir;
++			tmp += ".nebtmp";
++			stdfs::remove_all(tmp, ec);
++			stdfs::create_directories(tmp, ec);
++			p = 0;
++			while (p < in.size())
++			{
++				uint16_t pl;
++				memcpy(&pl, &in[p], 2);
++				p += 2;
++				const std::string rel = in.substr(p, pl);
++				p += pl;
++				uint64_t sz;
++				memcpy(&sz, &in[p], 8);
++				p += 8;
++				const fs::path dst = tmp / stdfs::path(rel);
++				stdfs::create_directories(dst.parent_path(), ec);
++				std::ofstream f(dst, std::ios::binary);
++				f.write(&in[p], (std::streamsize)sz);
++				if (!f)
++					{ err = "couldn't write the save to disk"; stdfs::remove_all(tmp, ec); return false; }
++				p += (size_t)sz;
++			}
++			stdfs::remove_all(dir, ec);
++			stdfs::create_directories(dir.parent_path(), ec);
++			stdfs::rename(tmp, dir, ec);
++			if (ec)
++			{
++				err = "couldn't put the downloaded save in place: " + ec.message();
++				return false;
++			}
++			return true;
++		}
++
++		void BackupLocal(const std::string& titleHex)
++		{
++			std::error_code ec;
++			const fs::path src = SaveDir(titleHex);
++			if (!stdfs::exists(src, ec))
++				return;
++			const auto now = std::chrono::system_clock::now().time_since_epoch();
++			const fs::path dst = ActiveSettings::GetUserDataPath("shared_saves_backup") / titleHex / std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now).count());
++			stdfs::create_directories(dst, ec);
++			stdfs::copy(src, dst, stdfs::copy_options::recursive, ec);
++		}
++
++		// ---------------------------------------------------------------- HTTP
++		size_t OnData(char* p, size_t s, size_t n, void* u)
++		{
++			auto* o = (std::string*)u;
++			if (o->size() + s * n > kMaxPack + 4096)
++				return 0;
++			o->append(p, s * n);
++			return s * n;
++		}
++		struct Upload { const std::string* data; size_t pos; };
++		size_t OnRead(char* p, size_t s, size_t n, void* u)
++		{
++			auto* up = (Upload*)u;
++			const size_t k = std::min(s * n, up->data->size() - up->pos);
++			memcpy(p, up->data->data() + up->pos, k);
++			up->pos += k;
++			return k;
++		}
++
++		std::string UrlEncode(const std::string& s)
++		{
++			std::string o;
++			char b[4];
++			for (unsigned char c : s)
++			{
++				if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
++					o += (char)c;
++				else
++				{
++					snprintf(b, sizeof(b), "%%%02X", c);
++					o += b;
++				}
++			}
++			return o;
++		}
++
++		// returns false with err on network problems; code holds the HTTP status
++		bool Http(const char* method, const std::string& url, const std::string* body, std::string& out, long& code, std::string& err, long timeout = 40)
++		{
++			CURL* c = curl_easy_init();
++			if (!c)
++			{
++				err = "network is not available";
++				return false;
++			}
++			out.clear();
++			Upload up{body, 0};
++			curl_easy_setopt(c, CURLOPT_URL, url.c_str());
++			curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, OnData);
++			curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
++			curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "https");
++			curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
++			curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L);
++			curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
++			curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
++			curl_easy_setopt(c, CURLOPT_USERAGENT, "NEBULATOR-shared-saves");
++			curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 8L);
++			curl_easy_setopt(c, CURLOPT_TIMEOUT, timeout);
++			curl_slist* hdr = nullptr;
++			hdr = curl_slist_append(hdr, "Content-Type: application/octet-stream");
++			if (body)
++			{
++				curl_easy_setopt(c, CURLOPT_UPLOAD, 1L);
++				curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method);
++				curl_easy_setopt(c, CURLOPT_READFUNCTION, OnRead);
++				curl_easy_setopt(c, CURLOPT_READDATA, &up);
++				curl_easy_setopt(c, CURLOPT_INFILESIZE_LARGE, (curl_off_t)body->size());
++			}
++			else if (strcmp(method, "GET") != 0)
++			{
++				curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method);
++				curl_easy_setopt(c, CURLOPT_POSTFIELDS, "");
++			}
++			curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
++			const CURLcode r = curl_easy_perform(c);
++			curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
++			curl_slist_free_all(hdr);
++			curl_easy_cleanup(c);
++			if (r != CURLE_OK)
++			{
++				err = std::string("couldn't reach the shared-saves server (") + curl_easy_strerror(r) + ")";
++				return false;
++			}
++			return true;
++		}
++
++		std::string ServerError(long code, const std::string& body)
++		{
++			rapidjson::Document d;
++			d.Parse(body.c_str());
++			if (!d.HasParseError() && d.IsObject() && d.HasMember("error"))
++				return GetStr(d, "error");
++			if (code == 404)
++				return "that code doesn't exist on this server";
++			return "the server answered HTTP " + std::to_string(code);
++		}
++
++		bool BaseUrl(std::string& u, std::string& err) // g_m NOT held
++		{
++			{
++				std::scoped_lock l(g_m);
++				LoadOnce();
++				u = g_url;
++			}
++			if (u.empty())
++			{
++				err = "set the shared-saves server address first";
++				return false;
++			}
++			while (!u.empty() && u.back() == '/')
++				u.pop_back();
++			return true;
++		}
++
++		struct Meta
++		{
++			std::string name, title, by;
++			int64_t version = 0, updated = 0, size = 0;
++		};
++
++		bool GetMeta(const std::string& code, Meta& m, std::string& err)
++		{
++			std::string base;
++			if (!BaseUrl(base, err))
++				return false;
++			std::string out;
++			long hc = 0;
++			if (!Http("GET", base + "/v1/" + code, nullptr, out, hc, err, 20))
++				return false;
++			if (hc != 200)
++			{
++				err = ServerError(hc, out);
++				return false;
++			}
++			rapidjson::Document d;
++			d.Parse(out.c_str());
++			if (d.HasParseError() || !d.IsObject())
++			{
++				err = "that address is not a shared-saves server";
++				return false;
++			}
++			m.name = GetStr(d, "name");
++			m.title = NormTitle(GetStr(d, "title"));
++			m.by = GetStr(d, "by");
++			m.version = GetInt(d, "version");
++			m.updated = GetInt(d, "updated");
++			m.size = GetInt(d, "size");
++			return true;
++		}
++
++		std::string Who()
++		{
++			return "NEBULATOR";
++		}
++
++		// uploads the local save; conflict is set when somebody else uploaded in between
++		bool Push(const std::string& code, std::string& err, bool* conflict = nullptr)
++		{
++			std::string base;
++			if (!BaseUrl(base, err))
++				return false;
++			Entry e;
++			{
++				std::scoped_lock l(g_m);
++				bool found = false;
++				for (auto& x : g_entries)
++					if (x.code == code) { e = x; found = true; }
++				if (!found)
++				{
++					err = "unknown shared save";
++					return false;
++				}
++			}
++			std::string pack;
++			if (!Pack(SaveDir(e.titleId), pack, err))
++				return false;
++			const uint64_t sig = Signature(SaveDir(e.titleId));
++			std::string out;
++			long hc = 0;
++			if (!Http("PUT", base + "/v1/" + code + "?base=" + std::to_string(e.version) + "&by=" + UrlEncode(Who()), &pack, out, hc, err, 120))
++				return false;
++			if (hc != 200)
++			{
++				err = ServerError(hc, out);
++				return false;
++			}
++			rapidjson::Document d;
++			d.Parse(out.c_str());
++			if (d.HasParseError() || !d.IsObject())
++			{
++				err = "unexpected answer from the server";
++				return false;
++			}
++			if (conflict)
++				*conflict = GetBool(d, "conflict");
++			std::scoped_lock l(g_m);
++			for (auto& x : g_entries)
++				if (x.code == code)
++				{
++					x.version = GetInt(d, "version");
++					x.sig = sig;
++					x.lastSync = (int64_t)std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
++				}
++			Save();
++			return true;
++		}
++
++		// downloads the newest version; the local save is backed up first
++		bool Pull(const std::string& code, std::string& err, bool force = false, bool* changed = nullptr)
++		{
++			std::string base;
++			if (!BaseUrl(base, err))
++				return false;
++			Entry e;
++			{
++				std::scoped_lock l(g_m);
++				bool found = false;
++				for (auto& x : g_entries)
++					if (x.code == code) { e = x; found = true; }
++				if (!found)
++				{
++					err = "unknown shared save";
++					return false;
++				}
++			}
++			Meta m;
++			if (!GetMeta(code, m, err))
++				return false;
++			if (changed)
++				*changed = false;
++			if (!force && m.version == e.version)
++				return true;
++			std::string data, tmpErr;
++			long hc = 0;
++			if (!Http("GET", base + "/v1/" + code + "/data", nullptr, data, hc, err, 120))
++				return false;
++			if (hc != 200)
++			{
++				err = ServerError(hc, data);
++				return false;
++			}
++			BackupLocal(e.titleId);
++			if (!Unpack(data, SaveDir(e.titleId), err))
++				return false;
++			if (changed)
++				*changed = true;
++			const uint64_t sig = Signature(SaveDir(e.titleId));
++			std::scoped_lock l(g_m);
++			for (auto& x : g_entries)
++				if (x.code == code)
++				{
++					x.version = m.version;
++					x.sig = sig;
++					x.name = m.name.empty() ? x.name : m.name;
++					x.lastSync = (int64_t)std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
++				}
++			Save();
++			return true;
++		}
++
++		void SetMsg(const std::string& code, const std::string& msg, bool ok)
++		{
++			std::scoped_lock l(g_m);
++			for (auto& x : g_entries)
++				if (x.code == code)
++				{
++					x.lastMsg = msg;
++					x.lastOk = ok;
++				}
++		}
++
++		std::string FindCodeForTitle(const std::string& titleHex)
++		{
++			std::scoped_lock l(g_m);
++			LoadOnce();
++			for (auto& x : g_entries)
++				if (x.titleId == titleHex)
++					return x.code;
++			return {};
++		}
++
++		void StopWatcher()
++		{
++			g_watch = false;
++			if (g_watcher.joinable())
++				g_watcher.join();
++		}
++
++		HttpResponse Status()
++		{
++			std::scoped_lock l(g_m);
++			LoadOnce();
++			Json j;
++			j.w.StartObject();
++			j.KS("url", g_url);
++			j.KB("configured", !g_url.empty());
++			j.KB("gameRunning", GetState() != State::Ui);
++			j.K("saves");
++			j.w.StartArray();
++			for (auto& e : g_entries)
++			{
++				j.w.StartObject();
++				j.KS("code", e.code);
++				j.KS("name", e.name);
++				j.KS("titleId", e.titleId);
++				j.KI("version", e.version);
++				j.KI("lastSync", e.lastSync);
++				j.KS("message", e.lastMsg);
++				j.KB("ok", e.lastOk);
++				j.KB("playing", !g_playingCode.empty() && g_playingCode == e.code);
++				j.w.EndObject();
++			}
++			j.w.EndArray();
++			j.w.EndObject();
++			return Ok(j);
++		}
++	} // namespace
++
++	// ====================================================================== hooks (called by the window system)
++	// before the game starts: bring the shared save up to date
++	void SharedSavesBeforeLaunch(uint64_t titleId)
++	{
++		try
++		{
++			const std::string t = NormTitle(HexId(titleId));
++			const std::string code = FindCodeForTitle(t);
++			if (code.empty())
++				return;
++			std::string err;
++			bool changed = false;
++			if (Pull(code, err, false, &changed))
++				SetMsg(code, changed ? "Downloaded the newest shared save before starting" : "Shared save was already up to date", true);
++			else
++				SetMsg(code, "Couldn't update before starting (" + err + "). Playing with your local save", false);
++			std::scoped_lock l(g_m);
++			g_playingTitle = t;
++			g_playingCode = code;
++		}
++		catch (...) {}
++	}
++
++	// the game is running: upload changes a few seconds after the game writes them
++	void SharedSavesGameStarted()
++	{
++		std::string code, title;
++		{
++			std::scoped_lock l(g_m);
++			code = g_playingCode;
++			title = g_playingTitle;
++		}
++		if (code.empty())
++			return;
++		StopWatcher();
++		g_watch = true;
++		g_watcher = std::thread([code, title] {
++			uint64_t last = 0;
++			{
++				std::scoped_lock l(g_m);
++				for (auto& x : g_entries)
++					if (x.code == code)
++						last = x.sig;
++			}
++			uint64_t pending = 0;
++			int stable = 0;
++			while (g_watch)
++			{
++				for (int i = 0; i < 40 && g_watch; i++)
++					std::this_thread::sleep_for(std::chrono::milliseconds(250));
++				if (!g_watch)
++					break;
++				const uint64_t sig = Signature(SaveDir(title));
++				if (sig == last || sig == 0)
++				{
++					stable = 0;
++					continue;
++				}
++				if (sig != pending)
++				{
++					pending = sig; // still changing, wait for it to settle
++					stable = 0;
++					continue;
++				}
++				if (++stable < 1)
++					continue;
++				std::string err;
++				bool conflict = false;
++				if (Push(code, err, &conflict))
++				{
++					last = sig;
++					SetMsg(code, conflict ? "Uploaded. Someone else saved at the same time: their version was kept as the previous one" : "Uploaded the latest save", true);
++				}
++				else
++					SetMsg(code, "Upload failed (" + err + "). Will retry", false);
++				stable = 0;
++			}
++		});
++	}
++
++	// the game was closed: final upload
++	void SharedSavesGameStopped()
++	{
++		StopWatcher();
++		std::string code;
++		{
++			std::scoped_lock l(g_m);
++			code = g_playingCode;
++			g_playingCode.clear();
++			g_playingTitle.clear();
++		}
++		if (code.empty())
++			return;
++		std::string err;
++		bool conflict = false;
++		if (Push(code, err, &conflict))
++			SetMsg(code, conflict ? "Uploaded. Someone else saved at the same time: their version was kept as the previous one" : "Uploaded the latest save", true);
++		else
++			SetMsg(code, "Upload failed (" + err + ")", false);
++	}
++
++	// ====================================================================== API
++	HttpResponse HandleSaves(const HttpRequest& req, const std::string& sub)
++	{
++		const bool post = req.method == "POST";
++		if (sub.empty() || sub == "/status")
++			return Status();
++		if (!post)
++			return Err(405, "POST expected");
++		rapidjson::Document d;
++		ParseBody(req, d);
++		std::string err;
++
++		if (sub == "/url")
++		{
++			std::string u = GetStr(d, "url");
++			while (!u.empty() && isspace((unsigned char)u.back()))
++				u.pop_back();
++			while (!u.empty() && u.back() == '/')
++				u.pop_back();
++			if (!u.empty() && u.rfind("https://", 0) != 0)
++				return Err(400, "the address must start with https://");
++			std::scoped_lock l(g_m);
++			LoadOnce();
++			g_url = u;
++			Save();
++			return OkSimple();
++		}
++		if (GetState() != State::Ui && sub != "/create")
++			return Err(409, "close the game first");
++
++		if (sub == "/create")
++		{
++			if (GetState() != State::Ui)
++				return Err(409, "close the game first");
++			const std::string name = GetStr(d, "name");
++			std::string title;
++			try { title = NormTitle(GetStr(d, "titleId")); } catch (...) {}
++			if (name.empty() || title.empty())
++				return Err(400, "give the save a name and pick a game");
++			std::string base;
++			if (!BaseUrl(base, err))
++				return Err(400, err);
++			std::string pack;
++			if (!Pack(SaveDir(title), pack, err))
++				return Err(400, err);
++			const uint64_t sig = Signature(SaveDir(title));
++			std::string out;
++			long hc = 0;
++			if (!Http("POST", base + "/v1/create?name=" + UrlEncode(name) + "&title=" + title, &pack, out, hc, err, 120))
++				return Err(502, err);
++			if (hc != 200)
++				return Err(502, ServerError(hc, out));
++			rapidjson::Document r;
++			r.Parse(out.c_str());
++			if (r.HasParseError() || !r.IsObject() || GetStr(r, "code").empty())
++				return Err(502, "that address is not a shared-saves server");
++			Entry e;
++			e.code = NormCode(GetStr(r, "code"));
++			e.name = name;
++			e.titleId = title;
++			e.version = GetInt(r, "version", 1);
++			e.sig = sig;
++			e.lastSync = (int64_t)std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
++			e.lastMsg = "Created. Share the code with your friends";
++			{
++				std::scoped_lock l(g_m);
++				LoadOnce();
++				g_entries.push_back(e);
++				Save();
++			}
++			Json j;
++			j.w.StartObject();
++			j.KB("ok", true);
++			j.KS("code", e.code);
++			{
++				std::scoped_lock l(g_m);
++				j.KS("link", g_url + "/" + e.code);
++			}
++			j.w.EndObject();
++			return Ok(j);
++		}
++		if (sub == "/join")
++		{
++			std::string raw = GetStr(d, "code");
++			const size_t sl = raw.rfind('/');
++			if (raw.rfind("https://", 0) == 0 && sl != std::string::npos && sl > 8)
++			{
++				// a full link: server address + code. Use that server.
++				std::scoped_lock l(g_m);
++				LoadOnce();
++				g_url = raw.substr(0, sl);
++				Save();
++				raw = raw.substr(sl + 1);
++			}
++			const std::string code = NormCode(raw);
++			if (code.size() < 8)
++				return Err(400, "that code is too short");
++			{
++				std::scoped_lock l(g_m);
++				LoadOnce();
++				for (auto& x : g_entries)
++					if (x.code == code)
++						return Err(409, "you already have this shared save");
++			}
++			Meta m;
++			if (!GetMeta(code, m, err))
++				return Err(502, err);
++			Entry e;
++			e.code = code;
++			e.name = m.name;
++			e.titleId = m.title;
++			e.version = 0;
++			e.lastMsg = "Joined. The save is downloaded the next time you start the game";
++			{
++				std::scoped_lock l(g_m);
++				g_entries.push_back(e);
++				Save();
++			}
++			// bring it down right away so the game starts with it
++			if (!Pull(code, err, true))
++				SetMsg(code, "Joined, but the first download failed (" + err + ")", false);
++			else
++				SetMsg(code, "Joined and downloaded. Your old save for this game was backed up", true);
++			return OkSimple();
++		}
++
++		const std::string code = NormCode(GetStr(d, "code"));
++		if (sub == "/remove")
++		{
++			std::scoped_lock l(g_m);
++			LoadOnce();
++			for (size_t i = 0; i < g_entries.size(); i++)
++				if (g_entries[i].code == code)
++				{
++					g_entries.erase(g_entries.begin() + (long)i);
++					break;
++				}
++			Save();
++			return OkSimple();
++		}
++		if (sub == "/push")
++		{
++			bool conflict = false;
++			if (!Push(code, err, &conflict))
++			{
++				SetMsg(code, "Upload failed (" + err + ")", false);
++				return Err(502, err);
++			}
++			SetMsg(code, conflict ? "Uploaded. Someone else saved at the same time: their version was kept as the previous one" : "Uploaded your save", true);
++			return OkSimple();
++		}
++		if (sub == "/pull")
++		{
++			if (!Pull(code, err, true))
++			{
++				SetMsg(code, "Download failed (" + err + ")", false);
++				return Err(502, err);
++			}
++			SetMsg(code, "Downloaded the newest shared save. Your old one was backed up", true);
++			return OkSimple();
++		}
++		if (sub == "/restore")
++		{
++			std::string base;
++			if (!BaseUrl(base, err))
++				return Err(400, err);
++			std::string out;
++			long hc = 0;
++			if (!Http("POST", base + "/v1/" + code + "/restore", nullptr, out, hc, err, 30))
++				return Err(502, err);
++			if (hc != 200)
++				return Err(502, ServerError(hc, out));
++			if (!Pull(code, err, true))
++				return Err(502, err);
++			SetMsg(code, "Went back to the previous version", true);
++			return OkSimple();
++		}
 +		return Err(404, "unknown route");
 +	}
 +} // namespace ControlApi
@@ -7740,10 +8639,10 @@ index 0000000..bb3afe8
 +} // namespace SdlKeys
 diff --git a/src/gui/sdlgui/SdlWindowSystem.cpp b/src/gui/sdlgui/SdlWindowSystem.cpp
 new file mode 100644
-index 0000000..52cd222
+index 0000000..35df760
 --- /dev/null
 +++ b/src/gui/sdlgui/SdlWindowSystem.cpp
-@@ -0,0 +1,863 @@
+@@ -0,0 +1,866 @@
 +// NEBULATOR core front end.
 +//
 +// Replaces Cemu's wxWidgets GUI with one SDL3 window. It implements the WindowSystem interface that the
@@ -8400,7 +9299,9 @@ index 0000000..52cd222
 +		}
 +		AssignDefaultInput();
 +		ControlApi::SkyRestore();
++		ControlApi::SharedSavesBeforeLaunch(CafeSystem::GetForegroundTitleId());
 +		CafeSystem::LaunchForegroundTitle();
++		ControlApi::SharedSavesGameStarted();
 +		g_state = ControlApi::State::Running;
 +		return true;
 +	}
@@ -8594,6 +9495,7 @@ index 0000000..52cd222
 +		if (auto status = CafeSystem::GetForegroundTitleReturnStatus())
 +			g_exitCode = *status;
 +		CafeSystem::Shutdown();
++		ControlApi::SharedSavesGameStopped();
 +	}
 +	InputManager::instance().Shutdown();
 +	SDLControllerProvider::ShutdownSDL();
