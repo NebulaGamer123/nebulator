@@ -18,9 +18,9 @@
   // standard gamepad layout -> Wii U Pro buttons (bottom face button is B on Nintendo pads)
   const PADMAP = { 0: 'B', 1: 'A', 2: 'Y', 3: 'X', 4: 'L', 5: 'R', 6: 'ZL', 7: 'ZR', 8: 'MINUS', 9: 'PLUS', 10: 'L3', 11: 'R3', 12: 'UP', 13: 'DOWN', 14: 'LEFT', 15: 'RIGHT', 16: 'HOME' };
 
-  let root = null, alive = false, st = null, lk = null, sig = '', timer = 0;
+  let root = null, alive = false, st = null, lk = null, sv = null, sig = '', timer = 0, svBusy = '';
   let found = [], scanning = false, scanned = false;
-  const form = { name: '', ip: '', code: '', hostName: '', lkName: '', lkIp: '', lkCode: '', pickId: '' };
+  const form = { name: '', ip: '', code: '', hostName: '', lkName: '', lkIp: '', lkCode: '', pickId: '', svName: '', svTitle: '', svCode: '', svServer: '', svDevice: '' };
   try { form.name = localStorage.getItem('neb.coopName') || ''; form.hostName = form.name; form.lkName = form.name; } catch { /* storage blocked */ }
 
   /* dropdown state survives re-renders and restarts */
@@ -36,8 +36,9 @@
     if (!alive && !view.on) return;
     try { st = await NEB.api('coop/status'); } catch { st = null; }
     try { lk = await NEB.api('coop/lock/status'); } catch { lk = null; }
+    try { sv = await NEB.api('saves/list'); } catch { sv = null; }
     guestSync();
-    const s = sigOf(st) + '|' + lkSig(lk);
+    const s = sigOf(st) + '|' + lkSig(lk) + '|' + (sv ? JSON.stringify(sv) : 'sv-off') + '|' + svBusy;
     if (alive && s !== sig) { sig = s; render(); } else paintLive();
     timer = setTimeout(poll, view.on ? 1000 : 1200);
   }
@@ -49,6 +50,12 @@
   const lkPost = async (path, body) => {
     try { lk = await NEB.api('coop/lock/' + path, body || {}); sig = ''; await poll(); return true; }
     catch (e) { SFX.error(); NEB.toast(e.message); await poll(); return false; }
+  };
+
+  const svPost = async (path, body, busyMsg) => {
+    svBusy = busyMsg || 'Working…'; sig = ''; if (alive) render();
+    try { sv = await NEB.api('saves/' + path, body || {}); svBusy = ''; sig = ''; await poll(); return true; }
+    catch (e) { svBusy = ''; SFX.error(); NEB.toast(e.message); sig = ''; await poll(); return false; }
   };
 
   async function scan() {
@@ -307,12 +314,96 @@
     return acc('grp-share', 'Screen-share co-op', sum + ' · one PC runs the game', h('div', { class: 'cp-subs' }, subs), { open: hosting || joined });
   }
 
+
+  /* ───────── shared saves ───────── */
+  const ago = t => {
+    if (!t) return '';
+    const d = Math.max(0, Math.floor(Date.now() / 1000) - t);
+    if (d < 60) return 'just now';
+    if (d < 3600) return Math.floor(d / 60) + ' min ago';
+    if (d < 86400) return Math.floor(d / 3600) + ' h ago';
+    return Math.floor(d / 86400) + ' d ago';
+  };
+  const copyText = (t, msg) => { try { navigator.clipboard.writeText(t); NEB.toast(msg || 'Copied'); } catch { NEB.toast('Could not copy'); } };
+
+  function svCard(x) {
+    const run = sv.running;
+    return h('div', { class: 'cp-svc' + (x.linked ? ' on' : '') },
+      h('div', { class: 'cp-svh' },
+        h('div', { class: 'cp-svt' }, h('b', null, x.name), h('span', { class: 'hint' }, gameName(x.titleId))),
+        h('div', { class: 'cp-svs' }, h('span', { class: 'hint' }, x.linked ? 'In use on this PC' : 'Not in use'),
+          toggle(x.linked, on => { if (run) { NEB.toast('Close the running game first'); sig = ''; poll(); return; } svPost(on ? 'link' : 'unlink', { id: x.id }, on ? 'Switching on…' : 'Switching off…'); }))),
+      h('p', { class: 'cp-svline' }, x.status || ''),
+      x.version > 0 ? h('p', { class: 'cp-svline dim' }, 'Version ' + x.version + (x.updatedBy ? ' · saved by ' + x.updatedBy : '') + (x.updatedAt ? ' · ' + ago(x.updatedAt) : '')) : null,
+      h('div', { class: 'cp-svb' },
+        h('button', { class: 'btn slim', onclick: () => { SFX.select(); copyText(x.code, 'Code copied. Send it to a friend'); } }, 'Copy code'),
+        x.linked ? h('button', { class: 'btn slim', disabled: run, onclick: () => svPost('sync', { id: x.id }, 'Syncing…') }, 'Sync now') : null,
+        x.linked && x.version > 1 ? h('button', { class: 'btn slim', disabled: run, onclick: () => { if (confirm('Go back to the version before the latest one? The latest stays on this PC as a backup.')) svPost('restore-prev', { id: x.id }, 'Restoring…'); } }, 'Previous version') : null,
+        h('button', { class: 'btn slim danger', onclick: () => { if (confirm('Remove "' + x.name + '" from this PC? It stays on the server, and the code still works.')) svPost('remove', { id: x.id }, 'Removing…'); } }, 'Remove')));
+  }
+
+  function svListBody() {
+    const list = sv.saves || [];
+    if (!list.length) return note('Nothing here yet. Create a shared save, or join one with a code from a friend.');
+    return h('div', { class: 'cp-svl' }, list.map(svCard),
+      sv.running ? note('A game is running. Saves upload a few seconds after you save in the game, and the rest when you quit.') : null);
+  }
+
+  function svCreateBody() {
+    if (!sv.server) return note('Connect a save server first (next section).');
+    const sel = h('select', { class: 'cp-select', onchange: e => { form.svTitle = e.target.value; } },
+      h('option', { value: '' }, 'Choose a game…'),
+      games().map(g => h('option', { value: g.titleId, selected: g.titleId === form.svTitle }, NEB.firstLine(g.name))));
+    return h('div', null,
+      note('Makes a brand new empty save for a game. It replaces your own save for that game only while it is switched on; yours is set aside and comes back when you switch it off.'),
+      field('Name', textIn('svName', 'e.g. Our Skylanders run', { max: 40 })),
+      field('Game', sel),
+      h('button', { class: 'btn primary', disabled: !!svBusy, onclick: () => {
+        if (!form.svName.trim() || !form.svTitle) return NEB.toast('Give it a name and choose a game');
+        svPost('create', { name: form.svName.trim(), titleId: form.svTitle }, 'Creating…').then(ok => { if (ok) { form.svName = ''; NEB.toast('Shared save created. Copy its code to share it'); } });
+      } }, 'Create shared save'));
+  }
+
+  function svJoinBody() {
+    return h('div', null,
+      note('Paste the code a friend sent you. You get their save, and from then on every save either of you makes goes to the other.'),
+      field('Code', textIn('svCode', 'NSAVE1-…', { max: 400, enter: () => doSvJoin() })),
+      h('button', { class: 'btn primary', disabled: !!svBusy, onclick: doSvJoin }, 'Join shared save'));
+  }
+  function doSvJoin() {
+    const c = form.svCode.trim();
+    if (!c) return NEB.toast('Paste the code first');
+    svPost('join', { code: c }, 'Joining…').then(ok => { if (ok) { form.svCode = ''; NEB.toast('Joined. The save is ready'); } });
+  }
+
+  function svServerBody() {
+    if (!form.svServer && sv.server) form.svServer = sv.server;
+    if (!form.svDevice) form.svDevice = sv.device || '';
+    return h('div', null,
+      sv.server ? pill('Connected', 'ok') : note('Shared saves are kept on a small free server that you set up once (about 10 minutes, no cost). Everyone who joins one of your saves automatically uses the same server through the code, so friends do not need their own. Step by step guide: github.com/NebulaGamer123/nebulator/tree/main/cloud'),
+      field('Server address', textIn('svServer', 'https://nebulator-saves.yourname.workers.dev', { max: 200 })),
+      field('Your name (shown as "saved by")', textIn('svDevice', 'e.g. Harrold', { max: 30 })),
+      h('button', { class: 'btn primary', disabled: !!svBusy, onclick: () => svPost('server', { url: form.svServer.trim(), device: form.svDevice.trim() }, 'Checking the server…').then(ok => { if (ok) NEB.toast(form.svServer.trim() ? 'Connected to the save server' : 'Saved'); }) }, sv.server ? 'Save' : 'Connect'));
+  }
+
+  function savesGroup() {
+    if (!sv) return acc('grp-saves', 'Shared saves', 'Needs the latest NEBULATOR core', note('Update NEBULATOR and restart it to use shared saves.'), { open: false });
+    const n = (sv.saves || []).length, used = (sv.saves || []).filter(x => x.linked).length;
+    const sum = (n ? n + ' save' + (n === 1 ? '' : 's') + ' · ' + used + ' in use' : 'Keep one save in step across PCs') + (svBusy ? ' · ' + svBusy : '');
+    const body = h('div', { class: 'cp-subs' },
+      acc('sv-list', 'Your shared saves', n ? n + ' save' + (n === 1 ? '' : 's') : 'None yet', svListBody(), { sub: true, open: true }),
+      acc('sv-new', 'Create a shared save', 'A new save for a game', svCreateBody(), { sub: true }),
+      acc('sv-join', 'Join with a code', 'Use a friend’s save', svJoinBody(), { sub: true }),
+      acc('sv-server', 'Save server', sv.server ? 'Connected' : 'Set up once', svServerBody(), { sub: true, open: !sv.server && !n }));
+    return acc('grp-saves', 'Shared saves', sum + ' · play the same save anywhere', body, { open: true });
+  }
+
   function render() {
     if (!root) return;
     root.replaceChildren(h('div', { class: 'pg coop' },
       h('div', { class: 'ph-row' }, h('div', null, h('div', { class: 'eyebrow' }, 'Play together'), h('h1', { class: 'ph' }, 'Co-op'))),
-      h('p', { class: 'lead' }, 'Two ways to play together. Lockstep lets every player run the game on their own PC with their own graphics settings. Screen-share streams one PC’s game to friends on the same Wi-Fi.'),
-      h('div', { class: 'cp-stack' }, lockstepGroup(), shareGroup())));
+      h('p', { class: 'lead' }, 'Lockstep lets every player run the game on their own PC with their own graphics settings. Screen-share streams one PC’s game to friends on the same Wi-Fi. Shared saves keep one save in step on every PC that has it.'),
+      h('div', { class: 'cp-stack' }, lockstepGroup(), shareGroup(), savesGroup())));
     paintLive();
   }
 
