@@ -824,10 +824,10 @@ index d66e971..593c886 100644
 -endif()
 diff --git a/src/gui/sdlgui/ControlApi.cpp b/src/gui/sdlgui/ControlApi.cpp
 new file mode 100644
-index 0000000..c8b32c7
+index 0000000..1ee6b4e
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.cpp
-@@ -0,0 +1,691 @@
+@@ -0,0 +1,692 @@
 +#include "ControlApi.h"
 +
 +#include "config/ActiveSettings.h"
@@ -1431,6 +1431,7 @@ index 0000000..c8b32c7
 +		g_cb = std::move(cb);
 +		g_token = std::move(token);
 +		g_uiDir = std::move(uiDir);
++		QuitComboStart();
 +	}
 +	void RequestQuit(bool appQuit)
 +	{
@@ -1521,10 +1522,10 @@ index 0000000..c8b32c7
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlApi.h b/src/gui/sdlgui/ControlApi.h
 new file mode 100644
-index 0000000..5e8d558
+index 0000000..2fac520
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlApi.h
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,89 @@
 +#pragma once
 +// JSON API + static file server behind the NEBULATOR UI.
 +
@@ -1598,6 +1599,7 @@ index 0000000..5e8d558
 +	HttpResponse HandleInput(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleSky(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleGfx(const HttpRequest& req, const std::string& sub);
++	void QuitComboStart(); // hold Back+Start on a pad to stop the running game and show the menu
 +	HttpResponse HandleUpdate(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleCoop(const HttpRequest& req, const std::string& sub);
 +	HttpResponse HandleSaves(const HttpRequest& req, const std::string& sub);
@@ -3252,10 +3254,10 @@ index 0000000..699acc1
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlInput.cpp b/src/gui/sdlgui/ControlInput.cpp
 new file mode 100644
-index 0000000..ea8d26c
+index 0000000..e7c8cc3
 --- /dev/null
 +++ b/src/gui/sdlgui/ControlInput.cpp
-@@ -0,0 +1,593 @@
+@@ -0,0 +1,694 @@
 +// Controller setup and binding API (players 1-4).
 +
 +#include "ControlApi.h"
@@ -3268,6 +3270,15 @@ index 0000000..ea8d26c
 +#include <SDL3/SDL.h>
 +#include <map>
 +#include <set>
++#include <thread>
++#include <mutex>
++#include <chrono>
++#ifdef _WIN32
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <Windows.h>
++#endif
 +
 +namespace ControlApi
 +{
@@ -3847,6 +3858,98 @@ index 0000000..ea8d26c
 +		if (sub == "/unbind")
 +			return Unbind(req);
 +		return Err(404, "unknown route");
++	}
++
++	// ---- hold Back/Select + Start for ~2 s to leave a running game and return to the NEBULATOR menu ----
++	namespace
++	{
++#ifdef _WIN32
++		BOOL CALLBACK FindMenuWnd(HWND h, LPARAM lp)
++		{
++			if (!IsWindowVisible(h))
++				return TRUE;
++			DWORD pid = 0;
++			GetWindowThreadProcessId(h, &pid);
++			if (pid == GetCurrentProcessId())
++				return TRUE; // the game's own window, not the Edge menu window
++			wchar_t title[128] = {};
++			GetWindowTextW(h, title, 127);
++			if (wcsncmp(title, L"NEBULATOR", 9) != 0)
++				return TRUE;
++			*(HWND*)lp = h;
++			return FALSE;
++		}
++		void BringMenuToFront()
++		{
++			HWND w = nullptr;
++			EnumWindows(FindMenuWnd, (LPARAM)&w);
++			if (!w)
++				return;
++			if (IsIconic(w))
++				ShowWindow(w, SW_RESTORE);
++			// Windows only lets the foreground process take focus; a synthetic Alt press lifts that restriction
++			keybd_event(VK_MENU, 0, 0, 0);
++			SetForegroundWindow(w);
++			keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
++		}
++#else
++		void BringMenuToFront() {}
++#endif
++		void QuitComboLoop()
++		{
++			int heldMs = 0;
++			bool fired = false;
++			for (;;)
++			{
++				std::this_thread::sleep_for(std::chrono::milliseconds(50));
++				if (GetState() == State::Ui)
++				{
++					heldMs = 0;
++					fired = false;
++					continue;
++				}
++				bool both = false;
++				SDL_Gamepad* hit = nullptr;
++				int n = 0;
++				SDL_JoystickID* ids = SDL_GetGamepads(&n);
++				for (int i = 0; ids && i < n; i++)
++				{
++					SDL_Gamepad* g = SDL_GetGamepadFromID(ids[i]);
++					if (!g)
++						continue; // only read pads that are already open, never open or close one here
++					if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_BACK) && SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_START))
++					{
++						both = true;
++						hit = g;
++						break;
++					}
++				}
++				if (ids)
++					SDL_free(ids);
++				if (!both)
++				{
++					heldMs = 0;
++					fired = false;
++					continue;
++				}
++				heldMs += 50;
++				if (heldMs >= 2000 && !fired)
++				{
++					fired = true;
++					if (hit)
++						SDL_RumbleGamepad(hit, 0x7000, 0x7000, 250);
++					RequestQuit(false);
++					std::this_thread::sleep_for(std::chrono::milliseconds(600));
++					BringMenuToFront();
++				}
++			}
++		}
++	} // namespace
++
++	void QuitComboStart()
++	{
++		static std::once_flag once;
++		std::call_once(once, [] { std::thread(QuitComboLoop).detach(); });
 +	}
 +} // namespace ControlApi
 diff --git a/src/gui/sdlgui/ControlSaves.cpp b/src/gui/sdlgui/ControlSaves.cpp

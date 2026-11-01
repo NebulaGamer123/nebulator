@@ -239,7 +239,7 @@
   function padLoop() {
     if (!alive) return;
     const gp = [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(Boolean);
-    if (gp && !document.body.classList.contains('modal-open')) {
+    if (gp && !document.body.classList.contains('modal-open') && !(NEB.padHas && NEB.padHas())) {
       const b = i => !!(gp.buttons[i] && gp.buttons[i].pressed), ax = gp.axes[0] || 0;
       const s = { l: b(14) || ax < -.6, r: b(15) || ax > .6, a: b(0), x: b(2) };
       if (s.l && !padPrev.l) go(-1);

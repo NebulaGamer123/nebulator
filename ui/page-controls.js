@@ -98,8 +98,13 @@
   }
 
   /* ───────── listening / binding ───────── */
+  let cancelT = 0;
+  function armCancel() {
+    clearTimeout(cancelT);
+    cancelT = setTimeout(() => { if (listening) { stopListening(); NEB.toast('Binding cancelled (no button pressed)'); } }, 7000);
+  }
   function stopListening() {
-    listening = null; seq = null; clearTimeout(capTimer); NEB.captureKeys = false; NEB.padBusy = false;
+    clearTimeout(cancelT); listening = null; seq = null; clearTimeout(capTimer); NEB.captureKeys = false; NEB.padBusy = false;
     paintRows();
   }
   function startListening(name, sequence) {
@@ -109,6 +114,8 @@
     const row = root && root.querySelector(`.brow[data-b="${name}"]`);
     if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     clearTimeout(capTimer); firstCapture = true; capLoop();
+    // with only a controller there is no Esc key: give up after a few idle seconds so the menu is never stuck waiting for a press
+    armCancel();
   }
   let firstCapture = true;
   async function capLoop() {
@@ -133,7 +140,7 @@
     SFX.bind();
     const next = seq ? nextButton(name) : null;
     flash(name);
-    if (next) { listening = next; firstCapture = true; SFX.arm(); paintRows(); const row = root.querySelector(`.brow[data-b="${next}"]`); if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+    if (next) { listening = next; firstCapture = true; SFX.arm(); armCancel(); paintRows(); const row = root.querySelector(`.brow[data-b="${next}"]`); if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
     else stopListening();
     paintRows();
   }

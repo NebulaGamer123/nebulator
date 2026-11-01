@@ -220,6 +220,7 @@
     const oldI = SYSTEMS.findIndex(s => s.id === S.sys), newI = SYSTEMS.findIndex(s => s.id === id);
     const dir = newI > oldI ? 1 : -1;
     S.sys = id; save(); SFX.tab(); syncRunning();
+    if (!sysOf(id).page) lastLib = id;
     rail.querySelectorAll('.sys').forEach(b => b.classList.toggle('on', b.dataset.id === id));
     moveInd();
     if (id !== 'settings' && sheetOpen) closeSheet();
@@ -238,10 +239,14 @@
     }, 170);
   }
   NEB.setSystem = setSystem;
+  let lastLib = null;
+  NEB.goHome = () => { const s = SYSTEMS.find(x => x.id === lastLib) || SYSTEMS.find(x => !x.page); if (s) setSystem(s.id); };
+  NEB.isSheetOpen = () => sheetOpen;
   const cycleSystem = n => {
     const i = SYSTEMS.findIndex(s => s.id === S.sys);
     setSystem(SYSTEMS[(i + n + SYSTEMS.length) % SYSTEMS.length].id);
   };
+  NEB.cycleSystem = cycleSystem;
 
   /* ───────── input ───────── */
   const blocked = () => document.body.classList.contains('page-open') || document.body.classList.contains('modal-open') || document.body.classList.contains('coop-view');
@@ -310,18 +315,18 @@
 
   let padPrev = {};
   function pollPad() {
-    const onPage = document.body.classList.contains('page-open') && !document.body.classList.contains('modal-open');
-    if ((blocked() && !onPage) || NEB.padBusy) return;
+    const gated = blocked() || sheetOpen || NEB.padBusy || runningEl.classList.contains('show'); // padnav.js drives pages, dialogs and the sheet
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
     const gp = [...pads].find(Boolean); if (!gp) return;
     const b = i => !!(gp.buttons[i] && gp.buttons[i].pressed), ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
     const st = { l: b(14) || ax < -.6, r: b(15) || ax > .6, u: b(12) || ay < -.6, d: b(13) || ay > .6, a: b(0), b: b(1), y: b(3), lb: b(4), rb: b(5) };
-    if (!onPage && st.l && !padPrev.l) move(-1);
-    if (!onPage && st.r && !padPrev.r) move(1);
+    if (gated || NEB.padSwallow) { NEB.padSwallow = false; padPrev = st; return; }
+    if (st.l && !padPrev.l) move(-1);
+    if (st.r && !padPrev.r) move(1);
     if ((st.d && !padPrev.d) || (st.rb && !padPrev.rb)) cycleSystem(1);
     if ((st.u && !padPrev.u) || (st.lb && !padPrev.lb)) cycleSystem(-1);
-    if (!onPage && st.a && !padPrev.a) activate();
-    if (!onPage && st.b && !padPrev.b) closeSheet();
+    if (st.a && !padPrev.a) activate();
+    if (st.b && !padPrev.b) closeSheet();
     padPrev = st;
   }
 
@@ -487,6 +492,7 @@
 
   /* ───────── settings sheet (sections live in page-misc.js) ───────── */
   function openSheet() { sheetOpen = true; document.body.classList.add('sheet-open'); sheet.setAttribute('aria-hidden', 'false'); renderSheet(); }
+  NEB.closeSheet = () => closeSheet();
   function closeSheet() { if (!sheetOpen) return; sheetOpen = false; document.body.classList.remove('sheet-open'); sheet.setAttribute('aria-hidden', 'true'); }
 
   function renderSheet() {
